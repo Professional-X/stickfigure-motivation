@@ -9,7 +9,7 @@ on:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 90  # image gen + whisper + ffmpeg can take a while
+    timeout-minutes: 120  # HF image gen + whisper + ffmpeg can take a while (free tier is slower than NVIDIA)
 
     steps:
       - uses: actions/checkout@v4
@@ -32,9 +32,14 @@ jobs:
 
       - name: Generate and publish video
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          # === LLM (OpenRouter, free Nemotron Ultra 550B) ===
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # === Image gen (HuggingFace Inference API, free Flux.1-dev) ===
+          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
+          # === Upload (Composio YouTube) ===
           COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
           COMPOSIO_ENTITY_ID: ${{ secrets.COMPOSIO_ENTITY_ID }}
+          # === Optional overrides (set as repo Variables, not Secrets) ===
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           IMAGE_MODEL: ${{ vars.IMAGE_MODEL }}
           VIDEO_OUTPUT_DIR: ./output
