@@ -144,6 +144,15 @@ def break_into_scenes(script: str, n: int) -> dict:
             plan = json.loads(raw)
             if "scenes" not in plan or not plan["scenes"]:
                 raise RuntimeError(f"LLM returned no scenes. Raw: {raw[:500]}")
+            # Enforce scene count: LLMs sometimes return wildly different counts
+            # than requested (we saw 63 returned when 25 was asked). Truncate
+            # to the requested count to keep video length predictable.
+            scenes = plan["scenes"]
+            if len(scenes) > n:
+                print(f"[script_gen] LLM returned {len(scenes)} scenes, truncating to {n}")
+                plan["scenes"] = scenes[:n]
+            elif len(scenes) < n:
+                print(f"[script_gen] WARNING: LLM returned only {len(scenes)} scenes (asked for {n})")
             print(f"[script_gen] got {len(plan['scenes'])} scenes, title: {plan.get('title', '?')[:60]}")
             return plan
         except json.JSONDecodeError as e:
