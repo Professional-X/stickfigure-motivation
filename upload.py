@@ -1,12 +1,19 @@
-"""Upload final video to YouTube via Composio.
+"""Upload final video to YouTube.
 
-Composio wraps the YouTube Data API behind their toolkit — you connect your
-Google account once in their dashboard, then call the action with an entity_id.
+Strategy (in priority order):
+1. YouTube Data API v3 (direct) — if YOUTUBE_REFRESH_TOKEN env var is set
+   Most reliable. Requires one-time OAuth setup (see README).
+2. Composio YouTube action — if COMPOSIO_API_KEY + COMPOSIO_ENTITY_ID are set
+   Note: known to be flaky as of 2026 (HTTP 410 on upload bytes transfer).
+3. Skip upload — print clear instructions for manual upload from artifact.
 
-If Composio's YouTube action isn't set up, this fails cleanly and the pipeline
-leaves the video file in place for manual upload.
+The pipeline never fails just because upload failed. The video is always
+saved as a GitHub Actions artifact for manual download.
 """
 import os
+import json
+import time
+import requests
 import config
 
 
@@ -16,20 +23,120 @@ def upload_to_youtube(
     description: str,
     tags: list[str],
 ) -> str:
-    """Upload and return the YouTube video ID (or Composio response)."""
-    if not config.COMPOSIO_API_KEY:
-        raise RuntimeError(
-            "COMPOSIO_API_KEY not set. Get one at https://composio.dev"
-        )
-    if not config.COMPOSIO_ENTITY_ID:
-        raise RuntimeError(
-            "COMPOSIO_ENTITY_ID not set. After connecting your YouTube account "
-            "in Composio dashboard, copy the entity_id here."
-        )
+    """Upload and return the YouTube video ID (or empty string on skip)."""
     if not os.path.exists(video_path):
         raise RuntimeError(f"video file not found: {video_path}")
 
-    # Import lazily so the script can run other steps even if composio isn't installed
+    # Path 1: Direct YouTube Data API (recommended)
+    if os.environ.get("YOUTUBE_REFRESH_TOKEN") and os.environ.get("YOUTUBE_CLIENT_ID"):
+        try:
+            return _upload_via_youtube_data_api(video_path, title, description, tags)
+        except Exception as e:
+            print(f"[upload] YouTube Data API failed: {type(e).__name__}: {e}")
+            print("[upload] falling through to Composio...")
+
+    # Path 2: Composio (flaky)
+    if config.COMPOSIO_API_KEY and config.COMPOSIO_ENTITY_ID:
+        try:
+            return _upload_via_composio(video_path, title, description, tags)
+        except Exception as e:
+            print(f"[upload] Composio failed: {type(e).__name__}: {e}")
+            print("[upload] falling through to manual upload...")
+
+    # Path 3: Skip
+    print("\n[upload] === AUTOMATIC UPLOAD SKIPPED ===")
+    print(f"[upload] video saved locally at: {video_path}")
+    print(f"[upload] file size: {os.path.getsize(video_path) / 1024 / 1024:.1f} MB")
+    print(f"[upload] The GitHub Actions run also uploads it as an artifact.")
+    print(f"[upload] Download from: https://github.com/Professional-X/stickfigure-motivation/actions")
+    print(f"[upload] Then upload manually at: https://www.youtube.com/upload")
+    print(f"[upload] Title to use: {title[:80]}")
+    return ""
+
+
+def _upload_via_youtube_data_api(video_path, title, description, tags) -> str:
+    """Direct YouTube Data API v3 upload using OAuth refresh token.
+
+    Setup (one-time):
+    1. Go to https://console.cloud.google.com/
+    2. Create a project, enable YouTube Data API v3
+    3. Create OAuth 2.0 Client ID (Desktop app type)
+    4. Run `python get_youtube_oauth.py` (in this repo) to obtain a refresh token
+    5. Set env vars: YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN
+    """
+    import urllib.parse
+    client_id = os.environ["YOUTUBE_CLIENT_ID"]
+    client_secret = os.environ["YOUTUBE_CLIENT_SECRET"]
+    refresh_token = os.environ["YOUTUBE_REFRESH_TOKEN"]
+
+    # Step 1: Exchange refresh token for access token
+    print("[upload] refreshing YouTube OAuth token...")
+    r = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    access_token = r.json()["access_token"]
+
+    # Step 2: Resumable upload — initiate session
+    print(f"[upload] initiating resumable upload for: {title[:60]}")
+    file_size = os.path.getsize(video_path)
+    metadata = {
+        "snippet": {
+            "title": title[:100],
+            "description": description[:4900],
+            "tags": tags[:10] if isinstance(tags, list) else [],
+            "categoryId": config.YOUTUBE_CATEGORY_ID,
+        },
+        "status": {
+            "privacyStatus": config.YOUTUBE_PRIVACY,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+    r = requests.post(
+        "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=UTF-8",
+            "X-Upload-Content-Type": "video/mp4",
+            "X-Upload-Content-Length": str(file_size),
+        },
+        json=metadata,
+        timeout=60,
+    )
+    r.raise_for_status()
+    upload_url = r.headers.get("Location")
+    if not upload_url:
+        raise RuntimeError("no upload URL returned by YouTube")
+
+    # Step 3: Upload the video bytes
+    print(f"[upload] uploading {file_size / 1024 / 1024:.1f} MB to YouTube...")
+    with open(video_path, "rb") as f:
+        r = requests.put(
+            upload_url,
+            headers={
+                "Content-Type": "video/mp4",
+                "Content-Length": str(file_size),
+            },
+            data=f,
+            timeout=600,
+        )
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"YouTube upload failed: HTTP {r.status_code} {r.text[:300]}")
+
+    video_id = r.json().get("id", "")
+    print(f"[upload] === uploaded: https://youtube.com/watch?v={video_id} ===")
+    return video_id
+
+
+def _upload_via_composio(video_path, title, description, tags) -> str:
+    """Composio YouTube upload. Known to be flaky as of 2026."""
     from composio import ComposioToolSet
 
     toolset = ComposioToolSet(
@@ -37,18 +144,15 @@ def upload_to_youtube(
         entity_id=config.COMPOSIO_ENTITY_ID,
     )
 
-    # Composio has used several action names over time. Try the most common ones.
     possible_actions = [
         "YOUTUBE_UPLOAD_VIDEO",
         "YOUTUBE_UPLOAD_A_VIDEO",
         "YOUTUBE_VIDEOS_INSERT",
-        "YOUTUBE_UPLOAD_VIDEO_ACTION",
     ]
-
     params = {
         "file_path": os.path.abspath(video_path),
-        "title": title[:100],  # YT title limit
-        "description": description[:4900],  # YT desc limit
+        "title": title[:100],
+        "description": description[:4900],
         "tags": tags[:10] if isinstance(tags, list) else tags,
         "category_id": config.YOUTUBE_CATEGORY_ID,
         "privacy_status": config.YOUTUBE_PRIVACY,
@@ -62,30 +166,22 @@ def upload_to_youtube(
             print(f"[upload] success via {action}")
             return _extract_video_id(result)
         except Exception as e:
-            msg = str(e).lower()
-            # If the action exists but failed for a real reason, don't try others
-            if "not found" not in msg and "no action" not in msg and "unknown action" not in msg:
-                # Real failure — surface it
-                raise RuntimeError(f"Composio action {action} failed: {e}")
             last_err = e
+            msg = str(e).lower()
+            if "not found" not in msg and "no action" not in msg and "unknown action" not in msg:
+                raise
             continue
 
-    raise RuntimeError(
-        f"No matching Composio YouTube upload action found. "
-        f"Check your Composio dashboard for the exact action name. "
-        f"Last error: {last_err}"
-    )
+    raise RuntimeError(f"Composio YouTube upload failed. Last error: {last_err}")
 
 
 def _extract_video_id(result) -> str:
-    """Composio responses come in various shapes — try to find a YT video ID."""
     if isinstance(result, str):
         return result
     if isinstance(result, dict):
         for key in ("id", "video_id", "videoId", "youtube_video_id"):
             if key in result:
                 return str(result[key])
-        # nested data
         if "data" in result and isinstance(result["data"], dict):
             for key in ("id", "video_id", "videoId"):
                 if key in result["data"]:
@@ -94,6 +190,7 @@ def _extract_video_id(result) -> str:
 
 
 if __name__ == "__main__":
-    # quick check
+    print(f"YOUTUBE_REFRESH_TOKEN set: {bool(os.environ.get('YOUTUBE_REFRESH_TOKEN'))}")
+    print(f"YOUTUBE_CLIENT_ID set: {bool(os.environ.get('YOUTUBE_CLIENT_ID'))}")
     print(f"COMPOSIO_API_KEY set: {bool(config.COMPOSIO_API_KEY)}")
     print(f"COMPOSIO_ENTITY_ID set: {bool(config.COMPOSIO_ENTITY_ID)}")
