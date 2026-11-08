@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+output/
+*.mp4
+*.mp3
+*.wav
+*.png
+*.jpg
+*.ass
+*.srt
+.DS_Store
+music/*.mp3
+music/*.wav
+!music/.gitkeep
