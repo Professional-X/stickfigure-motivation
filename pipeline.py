@@ -51,6 +51,10 @@ def run():
         generate_image(scene["image_prompt"], img_path, seed=seed)
         scene["image_path"] = img_path
 
+        # Be polite to HuggingFace's free-tier rate limiter (1 req/sec sustained)
+        import time as _time
+        _time.sleep(1.0)
+
         # TTS
         synth_scene(scene["narration"], audio_path)
         scene["audio_path"] = audio_path
