@@ -13,3 +13,5 @@ output/
 music/*.mp3
 music/*.wav
 !music/.gitkeep
+client_secret.json
+client_secret*.json
