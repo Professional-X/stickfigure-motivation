@@ -1,4 +1,4 @@
-"""Generate the video script + scene breakdown via NVIDIA Build LLM.
+"""Generate the video script + scene breakdown via OpenRouter (free Nemotron Ultra).
 
 Two-step:
 1. Write a 2,800-3,400 word motivation script for the day's theme.
@@ -6,14 +6,18 @@ Two-step:
 """
 import json
 import re
+import time
 from openai import OpenAI
 import config
 
 
 def _client() -> OpenAI:
-    if not config.NVIDIA_API_KEY:
-        raise RuntimeError("NVIDIA_API_KEY not set. Get one at https://build.nvidia.com")
-    return OpenAI(base_url=config.NVIDIA_BASE_URL, api_key=config.NVIDIA_API_KEY)
+    if not config.LLM_API_KEY:
+        raise RuntimeError(
+            f"LLM_API_KEY not set for provider '{config.LLM_PROVIDER}'. "
+            f"Set the appropriate env var (OPENROUTER_API_KEY or NVIDIA_API_KEY)."
+        )
+    return OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
 
 
 SYSTEM_PROMPT = """You are a ghostwriter for a YouTube motivation channel in the style of David Goggins crossed with Marcus Aurelius.
@@ -75,47 +79,75 @@ SCRIPT:
 
 
 def generate_script(theme: str, category: str) -> str:
-    """Step 1 — write the long-form script."""
+    """Step 1 — write the long-form script. Retries on rate-limit / empty response."""
     print(f"[script_gen] writing script for theme: {theme[:80]}...")
     client = _client()
-    resp = client.chat.completions.create(
-        model=config.LLM_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": SCRIPT_PROMPT.format(theme=theme, category=category)},
-        ],
-        temperature=0.85,
-        max_tokens=6000,
-    )
-    script = resp.choices[0].message.content.strip()
-    print(f"[script_gen] script length: {len(script.split())} words")
-    return script
+    last_err = None
+    for attempt in range(4):
+        try:
+            resp = client.chat.completions.create(
+                model=config.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": SCRIPT_PROMPT.format(theme=theme, category=category)},
+                ],
+                temperature=0.85,
+                max_tokens=6000,
+            )
+            script = (resp.choices[0].message.content or "").strip()
+            if not script:
+                raise RuntimeError("LLM returned empty script")
+            print(f"[script_gen] script length: {len(script.split())} words")
+            return script
+        except Exception as e:
+            last_err = e
+            print(f"[script_gen] attempt {attempt + 1} failed: {type(e).__name__}: {str(e)[:200]}")
+            time.sleep(8 * (attempt + 1))
+    raise RuntimeError(f"script generation failed after retries. last error: {last_err}")
 
 
 def break_into_scenes(script: str, n: int) -> dict:
-    """Step 2 — break into N scenes with image prompts. Returns structured plan."""
+    """Step 2 — break into N scenes with image prompts. Returns structured plan.
+
+    Note: response_format json_object is OpenAI/OpenRouter-specific. The free
+    Nemotron Ultra model honors it well in testing. As a defensive fallback we
+    also strip ```json fences if the model added them anyway.
+    """
     print(f"[script_gen] breaking into {n} scenes...")
     client = _client()
-    resp = client.chat.completions.create(
-        model=config.LLM_MODEL,
-        messages=[
-            {"role": "system", "content": "You are a JSON-only API. You output valid JSON only. No markdown fences, no commentary."},
-            {"role": "user", "content": SCENE_PROMPT.format(script=script, n=n)},
-        ],
-        temperature=0.4,
-        max_tokens=10000,
-        response_format={"type": "json_object"},
-    )
-    raw = resp.choices[0].message.content.strip()
-    # strip accidental ```json fences if the model ignored the rule
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-    plan = json.loads(raw)
-
-    if "scenes" not in plan or not plan["scenes"]:
-        raise RuntimeError(f"LLM returned no scenes. Raw: {raw[:500]}")
-    print(f"[script_gen] got {len(plan['scenes'])} scenes, title: {plan.get('title', '?')[:60]}")
-    return plan
+    last_err = None
+    for attempt in range(4):
+        try:
+            resp = client.chat.completions.create(
+                model=config.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a JSON-only API. You output valid JSON only. No markdown fences, no commentary."},
+                    {"role": "user", "content": SCENE_PROMPT.format(script=script, n=n)},
+                ],
+                temperature=0.4,
+                max_tokens=10000,
+                response_format={"type": "json_object"},
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            if not raw:
+                raise RuntimeError("LLM returned empty scene plan")
+            # strip accidental ```json fences if the model ignored the rule
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            plan = json.loads(raw)
+            if "scenes" not in plan or not plan["scenes"]:
+                raise RuntimeError(f"LLM returned no scenes. Raw: {raw[:500]}")
+            print(f"[script_gen] got {len(plan['scenes'])} scenes, title: {plan.get('title', '?')[:60]}")
+            return plan
+        except json.JSONDecodeError as e:
+            last_err = e
+            print(f"[script_gen] JSON parse failed (attempt {attempt + 1}): {e}")
+            time.sleep(5 * (attempt + 1))
+        except Exception as e:
+            last_err = e
+            print(f"[script_gen] attempt {attempt + 1} failed: {type(e).__name__}: {str(e)[:200]}")
+            time.sleep(8 * (attempt + 1))
+    raise RuntimeError(f"scene breakdown failed after retries. last error: {last_err}")
 
 
 def generate_video_plan(theme: str, category: str, n_scenes: int) -> dict:
