@@ -41,6 +41,7 @@ def run():
     print(f"\n[pipeline] {len(scenes)} scenes generated\n")
 
     # 4. Per-scene: image + TTS
+    import time as _time
     for i, scene in enumerate(scenes):
         print(f"\n--- scene {i + 1}/{len(scenes)} ---")
         img_path = os.path.join(work, f"img_{i:03d}.png")
@@ -51,9 +52,11 @@ def run():
         generate_image(scene["image_prompt"], img_path, seed=seed)
         scene["image_path"] = img_path
 
-        # Be polite to HuggingFace's free-tier rate limiter (1 req/sec sustained)
-        import time as _time
-        _time.sleep(1.0)
+        # Provider-aware polite delay between image calls
+        # Pollinations: must wait ~50s or get 402. Cloudflare/NVIDIA: no need.
+        if config.IMAGE_PROVIDER == "pollinations" and i < len(scenes) - 1:
+            print(f"    [pipeline] pollinations cooldown: {config.POLLINATIONS_DELAY}s")
+            _time.sleep(config.POLLINATIONS_DELAY)
 
         # TTS
         synth_scene(scene["narration"], audio_path)
