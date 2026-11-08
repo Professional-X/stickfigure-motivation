@@ -120,14 +120,22 @@ def run():
             description=plan["description"],
             tags=plan.get("tags", config.YOUTUBE_TAGS),
         )
-        print(f"\n[pipeline] === uploaded: https://youtube.com/watch?v={video_id} ===")
-        with open(os.path.join(work, "uploaded.txt"), "w") as f:
-            f.write(f"https://youtube.com/watch?v={video_id}\n")
+        if video_id:
+            print(f"\n[pipeline] === uploaded: https://youtube.com/watch?v={video_id} ===")
+            with open(os.path.join(work, "uploaded.txt"), "w") as f:
+                f.write(f"https://youtube.com/watch?v={video_id}\n")
+        else:
+            # Skipped (no YouTube OAuth, Composio broken) — not a failure
+            with open(os.path.join(work, "MANUAL_UPLOAD_NEEDED.txt"), "w") as f:
+                f.write(f"Video: {out_path}\n")
+                f.write(f"Title: {plan['title']}\n")
+                f.write(f"Description:\n{plan['description']}\n\n")
+                f.write(f"Tags: {', '.join(plan.get('tags', config.YOUTUBE_TAGS))}\n")
+                f.write(f"Upload at: https://www.youtube.com/upload\n")
     except Exception as e:
         print(f"\n[pipeline] UPLOAD FAILED: {e}")
         print(f"[pipeline] video saved locally at: {out_path}")
-        print(f"[pipeline] you can upload manually or fix the Composio setup and re-run.")
-        # Don't sys.exit(1) — the artifact will still upload for debugging
+        print(f"[pipeline] The GitHub Actions artifact contains the MP4 — download from the run page.")
         traceback.print_exc()
 
     print(f"\n[pipeline] run complete. workspace: {work}")
