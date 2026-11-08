@@ -9,7 +9,7 @@ on:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # HF image gen + whisper + ffmpeg can take a while (free tier is slower than NVIDIA)
+    timeout-minutes: 90  # Pollinations ~50s/image × 25 = ~21 min + whisper + ffmpeg
 
     steps:
       - uses: actions/checkout@v4
@@ -34,14 +34,15 @@ jobs:
         env:
           # === LLM (OpenRouter, free Nemotron Ultra 550B) ===
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          # === Image gen (HuggingFace Inference API, free Flux.1-dev) ===
-          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
           # === Upload (Composio YouTube) ===
           COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
           COMPOSIO_ENTITY_ID: ${{ secrets.COMPOSIO_ENTITY_ID }}
+          # === Optional: Cloudflare Workers AI (faster than Pollinations) ===
+          # If both set, also set IMAGE_PROVIDER=cloudflare as a repo Variable
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           # === Optional overrides (set as repo Variables, not Secrets) ===
-          LLM_MODEL: ${{ vars.LLM_MODEL }}
-          IMAGE_MODEL: ${{ vars.IMAGE_MODEL }}
+          IMAGE_PROVIDER: ${{ vars.IMAGE_PROVIDER }}
           VIDEO_OUTPUT_DIR: ./output
         run: python pipeline.py
 
