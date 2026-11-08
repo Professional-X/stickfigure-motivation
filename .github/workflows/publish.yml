@@ -34,7 +34,12 @@ jobs:
         env:
           # === LLM (OpenRouter, free Nemotron Ultra 550B) ===
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          # === Upload (Composio YouTube) ===
+          # === Upload: Direct YouTube Data API (recommended) ===
+          # Set these 3 to enable direct upload. See get_youtube_oauth.py for setup.
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          # === Upload: Composio fallback (flaky as of 2026) ===
           COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
           COMPOSIO_ENTITY_ID: ${{ secrets.COMPOSIO_ENTITY_ID }}
           # === Optional: Cloudflare Workers AI (faster than Pollinations) ===
