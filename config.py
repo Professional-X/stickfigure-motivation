@@ -1,10 +1,12 @@
 """Central config — change models, voice, themes here.
 
-Provider swap: now using OpenRouter (free Nemotron Ultra 550B) for LLM and
-HuggingFace Inference API (free Flux.1-dev) for images. Total cost: $0/video.
+Provider swap (v3): OpenRouter (free Nemotron Ultra 550B) for LLM +
+Pollinations.ai (free, no auth) for images. Total cost: $0/video.
 
-To switch back to NVIDIA Build or add another provider, edit LLM_PROVIDER +
-the matching section below.
+Pollinations rate-limits to ~1 image / 45s on free tier. With 25 scenes that's
+~20 min of waiting — annoying but free. Set CLOUDFLARE_API_TOKEN +
+CLOUDFLARE_ACCOUNT_ID env vars and IMAGE_PROVIDER=cloudflare to switch to
+Cloudflare Workers AI (10k free neurons/day, much faster, no rate limit).
 """
 import os
 from dotenv import load_dotenv
@@ -42,14 +44,29 @@ else:  # openrouter (default)
 
 
 # ============================================================
-# IMAGE PROVIDER — defaults to HuggingFace Inference API (free)
+# IMAGE PROVIDER — defaults to Pollinations.ai (free, no auth)
 # ============================================================
-IMAGE_PROVIDER = os.environ.get("IMAGE_PROVIDER") or "huggingface"
+IMAGE_PROVIDER = os.environ.get("IMAGE_PROVIDER") or "pollinations"
 
-# --- HuggingFace Inference API (https://huggingface.co/settings/tokens) ---
+# --- Pollinations.ai (free, no API key, ~1 req / 45s rate limit) ---
+POLLINATIONS_URL = "https://image.pollinations.ai/prompt"
+POLLINATIONS_MODEL = os.environ.get("POLLINATIONS_MODEL") or "flux"  # 'flux' | 'turbo'
+POLLINATIONS_DELAY = 50  # seconds between calls — proven safe under their rate limiter
+
+# --- Cloudflare Workers AI (free 10k neurons/day, much faster, needs signup) ---
+# Get account ID: https://dash.cloudflare.com → right sidebar
+# Get API token: https://dash.cloudflare.com/profile/api-tokens → "Workers AI" template
+CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID") or ""
+CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN") or ""
+CLOUDFLARE_FLUX_URL = (
+    f"https://api.cloudflare.com/client/v4/accounts/"
+    f"{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/black-forest-labs/flux-1-schnell"
+)
+
+# --- HuggingFace (legacy, kept for reference — free tier dropped Flux) ---
 HF_API_TOKEN = os.environ.get("HF_API_TOKEN") or ""
 HF_MODEL_ID = "black-forest-labs/FLUX.1-dev"
-HF_ENDPOINT = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
+HF_ENDPOINT = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL_ID}"
 
 # --- NVIDIA Flux (legacy, kept for reference) ---
 NVIDIA_IMAGE_API_KEY = os.environ.get("NVIDIA_API_KEY") or ""
@@ -71,7 +88,8 @@ TTS_RATE = "-8%"  # slightly slower for gravitas
 # ============================================================
 # Video specs
 # ============================================================
-SCENES_PER_VIDEO = 35        # ~30 sec per scene -> ~17-18 min total
+SCENES_PER_VIDEO = 25        # ~30 sec per scene -> ~12-13 min total
+                            # (was 35; reduced to fit Pollinations rate-limit comfortably)
 KEN_BURNS_ZOOM = 1.15        # 15% zoom-in over each scene
 KEN_BURNS_ZOOM_STEP = 0.0005 # zoompan increment per frame
 
