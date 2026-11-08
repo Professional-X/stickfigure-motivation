@@ -79,7 +79,12 @@ SCRIPT:
 
 
 def generate_script(theme: str, category: str) -> str:
-    """Step 1 — write the long-form script. Retries on rate-limit / empty response."""
+    """Step 1 — write the long-form script. Retries on rate-limit / empty response.
+
+    IMPORTANT: Nemotron Ultra is a reasoning model — without `reasoning: {enabled: false}`
+    it spends ~600+ tokens on internal reasoning and may exhaust max_tokens before
+    producing visible content. We pass extra_body to disable reasoning explicitly.
+    """
     print(f"[script_gen] writing script for theme: {theme[:80]}...")
     client = _client()
     last_err = None
@@ -93,6 +98,7 @@ def generate_script(theme: str, category: str) -> str:
                 ],
                 temperature=0.85,
                 max_tokens=6000,
+                extra_body={"reasoning": {"enabled": False}},
             )
             script = (resp.choices[0].message.content or "").strip()
             if not script:
@@ -109,9 +115,9 @@ def generate_script(theme: str, category: str) -> str:
 def break_into_scenes(script: str, n: int) -> dict:
     """Step 2 — break into N scenes with image prompts. Returns structured plan.
 
-    Note: response_format json_object is OpenAI/OpenRouter-specific. The free
-    Nemotron Ultra model honors it well in testing. As a defensive fallback we
-    also strip ```json fences if the model added them anyway.
+    CRITICAL: Nemotron Ultra is a reasoning model — without disabling reasoning,
+    it spends ~600+ tokens thinking and may produce empty content when the prompt
+    is large (full script). We disable reasoning via extra_body.
     """
     print(f"[script_gen] breaking into {n} scenes...")
     client = _client()
@@ -125,8 +131,9 @@ def break_into_scenes(script: str, n: int) -> dict:
                     {"role": "user", "content": SCENE_PROMPT.format(script=script, n=n)},
                 ],
                 temperature=0.4,
-                max_tokens=10000,
+                max_tokens=16000,
                 response_format={"type": "json_object"},
+                extra_body={"reasoning": {"enabled": False}},
             )
             raw = (resp.choices[0].message.content or "").strip()
             if not raw:
