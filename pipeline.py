@@ -41,22 +41,18 @@ def run():
     print(f"\n[pipeline] {len(scenes)} scenes generated\n")
 
     # 4. Per-scene: image + TTS
-    import time as _time
+    # SVG pose rendering is instant — no rate limit delay needed.
     for i, scene in enumerate(scenes):
         print(f"\n--- scene {i + 1}/{len(scenes)} ---")
         img_path = os.path.join(work, f"img_{i:03d}.png")
         audio_path = os.path.join(work, f"audio_{i:03d}.mp3")
 
-        # Image — seed varies per scene for visual variety, but stays deterministic
-        seed = config.IMAGE_SEED + i * 7
-        generate_image(scene["image_prompt"], img_path, seed=seed)
+        # Render the pose — uses the "pose" field (falls back to image_prompt
+        # for backwards compat). Deterministic, no API calls.
+        pose_name = scene.get("pose") or scene.get("image_prompt") or "standing_tall"
+        generate_image(pose_name, img_path)
         scene["image_path"] = img_path
-
-        # Provider-aware polite delay between image calls
-        # Pollinations: must wait ~50s or get 402. Cloudflare/NVIDIA: no need.
-        if config.IMAGE_PROVIDER == "pollinations" and i < len(scenes) - 1:
-            print(f"    [pipeline] pollinations cooldown: {config.POLLINATIONS_DELAY}s")
-            _time.sleep(config.POLLINATIONS_DELAY)
+        scene["pose_used"] = pose_name if pose_name in __import__("svg_poses").POSE_REGISTRY else "standing_tall"
 
         # TTS
         synth_scene(scene["narration"], audio_path)
