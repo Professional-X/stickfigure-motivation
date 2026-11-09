@@ -9,7 +9,7 @@ on:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 90  # Pollinations ~50s/image × 25 = ~21 min + whisper + ffmpeg
+    timeout-minutes: 30  # SVG render is instant; main cost is whisper + ffmpeg
 
     steps:
       - uses: actions/checkout@v4
@@ -20,10 +20,10 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install ffmpeg + ffprobe
+      - name: Install ffmpeg + ffprobe + SVG tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg librsvg2-bin
 
       - name: Install Python dependencies
         run: |
