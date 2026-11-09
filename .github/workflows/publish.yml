@@ -91,9 +91,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Only commit lightweight files (not the mp4) — retry workflow
-          # downloads mp4 from the GitHub Release on demand.
-          git add output/*/metadata.json output/*/MANUAL_UPLOAD_NEEDED.txt output/*/release_info.json 2>/dev/null || true
+          # Force-add lightweight files (output/ is gitignored, but we want
+          # these specific files tracked so retry_upload can find them).
+          git add -f output/*/metadata.json output/*/MANUAL_UPLOAD_NEEDED.txt output/*/release_info.json 2>/dev/null || true
           if ! git diff --cached --quiet; then
             git commit -m "chore: video metadata for retry upload [skip ci]"
             git push
