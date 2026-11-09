@@ -136,43 +136,111 @@ def _upload_via_youtube_data_api(video_path, title, description, tags) -> str:
 
 
 def _upload_via_composio(video_path, title, description, tags) -> str:
-    """Composio YouTube upload. Known to be flaky as of 2026."""
-    from composio import ComposioToolSet
+    """Composio YouTube upload via v3.1 API.
 
-    toolset = ComposioToolSet(
-        api_key=config.COMPOSIO_API_KEY,
-        entity_id=config.COMPOSIO_ENTITY_ID,
-    )
-
-    possible_actions = [
+    Composio deprecated their v1 API (returns 410 "upgrade to v3"). The v3.1
+    endpoint is POST https://api.composio.dev/v3.1/tools/execute/{tool_slug}
+    with x-api-key header. We try common YouTube upload tool slugs.
+    """
+    # Try v3.1 REST API directly (more reliable than the SDK which may be outdated)
+    tool_slugs = [
         "YOUTUBE_UPLOAD_VIDEO",
         "YOUTUBE_UPLOAD_A_VIDEO",
         "YOUTUBE_VIDEOS_INSERT",
+        "youtube_upload_video",
+        "youtube_upload_a_video",
     ]
-    params = {
-        "file_path": os.path.abspath(video_path),
-        "title": title[:100],
-        "description": description[:4900],
-        "tags": tags[:10] if isinstance(tags, list) else tags,
-        "category_id": config.YOUTUBE_CATEGORY_ID,
-        "privacy_status": config.YOUTUBE_PRIVACY,
+    headers = {
+        "x-api-key": config.COMPOSIO_API_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "entity_id": config.COMPOSIO_ENTITY_ID,
+        "arguments": {
+            "title": title[:100],
+            "description": description[:4900],
+            "tags": tags[:10] if isinstance(tags, list) else [],
+            "category_id": config.YOUTUBE_CATEGORY_ID,
+            "privacy_status": config.YOUTUBE_PRIVACY,
+            "file_path": os.path.abspath(video_path),
+        },
+    }
+
+    import base64
+    # Try with file as base64 (Composio v3 may expect this for uploads)
+    with open(video_path, "rb") as f:
+        video_b64 = base64.b64encode(f.read()).decode("utf-8")
+    payload_b64 = {
+        "entity_id": config.COMPOSIO_ENTITY_ID,
+        "arguments": {
+            "title": title[:100],
+            "description": description[:4900],
+            "tags": tags[:10] if isinstance(tags, list) else [],
+            "category_id": config.YOUTUBE_CATEGORY_ID,
+            "privacy_status": config.YOUTUBE_PRIVACY,
+            "file": video_b64,
+        },
     }
 
     last_err = None
-    for action in possible_actions:
-        try:
-            print(f"[upload] trying Composio action: {action}")
-            result = toolset.execute_action(action=action, params=params)
-            print(f"[upload] success via {action}")
-            return _extract_video_id(result)
-        except Exception as e:
-            last_err = e
-            msg = str(e).lower()
-            if "not found" not in msg and "no action" not in msg and "unknown action" not in msg:
-                raise
-            continue
+    for slug in tool_slugs:
+        for body_variant_name, body in [("path", payload), ("base64", payload_b64)]:
+            try:
+                print(f"[upload] trying Composio v3.1: {slug} (file={body_variant_name})")
+                r = requests.post(
+                    f"https://api.composio.dev/v3.1/tools/execute/{slug}",
+                    headers=headers,
+                    json=body,
+                    timeout=300,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    print(f"[upload] success via {slug} (file={body_variant_name})")
+                    return _extract_video_id(data)
+                elif r.status_code == 404:
+                    # Tool slug doesn't exist — try next
+                    last_err = f"HTTP 404 for {slug}: {r.text[:200]}"
+                    continue
+                elif r.status_code == 410:
+                    last_err = f"HTTP 410 for {slug}: {r.text[:200]}"
+                    continue
+                else:
+                    last_err = f"HTTP {r.status_code} for {slug}: {r.text[:300]}"
+                    print(f"[upload] {last_err}")
+                    # Don't try other variants for non-404 errors — surface the issue
+                    if r.status_code in (400, 401, 403):
+                        return _extract_video_id(r.json()) if r.headers.get("content-type", "").startswith("application/json") else ""
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+                print(f"[upload] {slug} ({body_variant_name}) exception: {last_err}")
+                continue
 
-    raise RuntimeError(f"Composio YouTube upload failed. Last error: {last_err}")
+    # Fall back to legacy SDK if v3.1 didn't work
+    try:
+        print("[upload] falling back to Composio SDK...")
+        from composio import ComposioToolSet
+        toolset = ComposioToolSet(
+            api_key=config.COMPOSIO_API_KEY,
+            entity_id=config.COMPOSIO_ENTITY_ID,
+        )
+        params = {
+            "file_path": os.path.abspath(video_path),
+            "title": title[:100],
+            "description": description[:4900],
+            "tags": tags[:10] if isinstance(tags, list) else tags,
+            "category_id": config.YOUTUBE_CATEGORY_ID,
+            "privacy_status": config.YOUTUBE_PRIVACY,
+        }
+        for action in tool_slugs:
+            try:
+                result = toolset.execute_action(action=action, params=params)
+                return _extract_video_id(result)
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[upload] SDK fallback failed: {e}")
+
+    raise RuntimeError(f"Composio YouTube upload failed (all v3.1 + SDK attempts). Last error: {last_err}")
 
 
 def _extract_video_id(result) -> str:
