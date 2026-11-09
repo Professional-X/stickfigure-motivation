@@ -1,83 +1,78 @@
-"""Deterministic stick-figure frame renderer — clean-minimal design system v6.
+"""Deterministic stick-figure renderer — v7 "IKEA instruction" style.
 
-v6 fixes: stick figures completely redrawn for perfectionist-quality:
-  * Smooth Bezier curves for spine (natural S-curve, not straight lines)
-  * Rounded line joints (no sharp corners)
-  * Small filled circles at hands and feet (clean termination, looks intentional)
-  * Better proportions: head 1/8 of body height (was 1/10)
-  * Thicker stroke (8px) for confident, bold lines
-  * Smoothed arm/leg curves via quadratic Beziers
+DESIGN PHILOSOPHY (changed from v6):
+  * ONE character, drawn the same way in every frame
+  * Clean minimalist line art — IKEA instruction manual aesthetic
+  * Single thin black line (3px), no fills, no hand/foot dots
+  * Simple circle head, straight limbs, minimal joints
+  * Background: free CC-licensed texture from Openverse (paper, concrete, etc.)
+  * NO zoom, NO pan — static frames only
 
-Inspired by the instagram-auto-poster design language:
-  * Pure white canvas (1280x720 horizontal)
-  * One accent color (deep red #C8102E — discipline/brutal vibe)
-  * Big bold typography for short caption per scene
-  * Generous whitespace, no gradients, no clutter
-  * Brand pill in corner + scene counter
+The stick figure is drawn with consistent proportions:
+  * Head: circle, radius 30px
+  * Body: 180px tall (head center to hip)
+  * Arms: attach at shoulder (40px below head center), 90px long
+  * Legs: attach at hip, 110px long
+  * Total height: ~330px (head top to feet)
+
+Pose variations only change limb angles, never proportions or stroke style.
+This makes the character feel like the SAME person in different positions.
 """
 import os
-import textwrap
 import math
-from PIL import Image, ImageDraw, ImageFont
+import textwrap
+import requests
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 import config
 
 
 # ============================================================
-# Design tokens
+# Design tokens — IKEA instruction style
 # ============================================================
 CANVAS = (1280, 720)
 
 # Colors
-BG = (255, 255, 255)
-INK = (11, 11, 18)
+BG_FALLBACK = (250, 248, 244)  # warm off-white if no texture
+INK = (15, 15, 20)             # near-black for stick figure + text
 MUTED = (107, 111, 118)
-ACCENT = (200, 16, 46)         # deep red
+ACCENT = (200, 16, 46)         # deep red accent
 ACCENT_TINT = (255, 235, 238)
-LINE_COLOR = (11, 11, 18)
-LINE_WIDTH = 8                 # thicker = bolder, cleaner
-JOINT_RADIUS = 6              # small circles at hands/feet
-HEAD_RADIUS = 42              # bigger head
+WHITE = (255, 255, 255)
+WHITE_OVERLAY = (255, 255, 255, 200)  # semi-transparent white to fade backgrounds
+
+# Stick figure stroke — thin, clean, single line
+STROKE_COLOR = (15, 15, 20)
+STROKE_WIDTH = 4               # thin = elegant
+HEAD_RADIUS = 32
 
 # Layout
 MARGIN = 80
 CONTENT_W = CANVAS[0] - 2 * MARGIN
 
-FONT_DISPLAY = None
-FONT_BODY = None
-FONT_MONO = None
-
-
-def _load_fonts():
-    global FONT_DISPLAY, FONT_BODY, FONT_MONO
-    candidates = {
-        "display": ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"],
-        "body": ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                 "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"],
-        "mono": ["/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
-                 "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf"],
-    }
-    loaded = {}
-    for key, paths in candidates.items():
-        for p in paths:
-            if os.path.exists(p):
-                loaded[key] = p
-                break
-    FONT_DISPLAY = loaded.get("display")
-    FONT_BODY = loaded.get("body")
-    FONT_MONO = loaded.get("mono")
-
-
+# Fonts (lazy-loaded)
+_FONT_CACHE = {}
 def _font(size: int, bold: bool = False, mono: bool = False):
-    if FONT_MONO is None:
-        _load_fonts()
-    if mono and FONT_MONO:
-        return ImageFont.truetype(FONT_MONO, size)
-    if bold and FONT_DISPLAY:
-        return ImageFont.truetype(FONT_DISPLAY, size)
-    if FONT_BODY:
-        return ImageFont.truetype(FONT_BODY, size)
-    return ImageFont.load_default()
+    key = (size, bold, mono)
+    if key in _FONT_CACHE:
+        return _FONT_CACHE[key]
+    paths = []
+    if mono:
+        paths = ["/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+                 "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf"]
+    elif bold:
+        paths = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                 "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"]
+    else:
+        paths = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                 "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"]
+    for p in paths:
+        if os.path.exists(p):
+            f = ImageFont.truetype(p, size)
+            _FONT_CACHE[key] = f
+            return f
+    f = ImageFont.load_default()
+    _FONT_CACHE[key] = f
+    return f
 
 
 def _wrap_text(text: str, font, draw: ImageDraw.ImageDraw, max_w: int) -> list[str]:
@@ -97,591 +92,467 @@ def _wrap_text(text: str, font, draw: ImageDraw.ImageDraw, max_w: int) -> list[s
 
 
 # ============================================================
-# Drawing primitives — smooth, professional
+# Stick figure drawing — ONE character, pose variations only
 # ============================================================
-def _line(draw, x1, y1, x2, y2, width=LINE_WIDTH):
-    """Straight line with rounded end caps (drawn as filled circles)."""
-    draw.line([(x1, y1), (x2, y2)], fill=LINE_COLOR, width=width, joint="curve")
-    # Round end caps so joints look smooth
-    draw.ellipse([x1 - width/2, y1 - width/2, x1 + width/2, y1 + width/2], fill=LINE_COLOR)
-    draw.ellipse([x2 - width/2, y2 - width/2, x2 + width/2, y2 + width/2], fill=LINE_COLOR)
+# All poses share these proportions:
+#   head_cy = top of figure
+#   shoulder_y = head_cy + HEAD_RADIUS + 8
+#   hip_y = shoulder_y + 110
+#   feet_y = hip_y + 110
+# Total figure height: ~330px
+#
+# Pose functions take (draw, cx, head_cy) and draw the character.
+# cx = horizontal center of figure
+# head_cy = vertical center of head circle
+
+FIGURE_HEAD_CY = 180  # default head center Y
+
+def _draw_head(draw, cx, cy):
+    """Circle head — clean stroke, no fill."""
+    bbox = [cx - HEAD_RADIUS, cy - HEAD_RADIUS, cx + HEAD_RADIUS, cy + HEAD_RADIUS]
+    draw.ellipse(bbox, outline=STROKE_COLOR, width=STROKE_WIDTH)
 
 
-def _curve(draw, points, width=LINE_WIDTH):
-    """Smooth curve through multiple points using quadratic Beziers."""
-    if len(points) < 2:
-        return
-    # Draw as connected line segments with curve joint
-    draw.line(points, fill=LINE_COLOR, width=width, joint="curve")
-    # Round caps at endpoints
-    p1, p2 = points[0], points[-1]
-    draw.ellipse([p1[0] - width/2, p1[1] - width/2, p1[0] + width/2, p1[1] + width/2], fill=LINE_COLOR)
-    draw.ellipse([p2[0] - width/2, p2[1] - width/2, p2[0] + width/2, p2[1] + width/2], fill=LINE_COLOR)
+def _draw_spine(draw, cx, head_cy, lean=0):
+    """Spine: straight line from below head to hip. Optional lean."""
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _line(draw, cx + lean * 0.3, shoulder_y, cx + lean, hip_y)
 
 
-def _circle(draw, cx, cy, r, width=LINE_WIDTH):
-    """Head circle — clean stroke."""
-    bbox = [cx - r, cy - r, cx + r, cy + r]
-    draw.ellipse(bbox, outline=LINE_COLOR, width=width)
+def _draw_limb(draw, x1, y1, x2, y2):
+    """Draw one limb segment — straight line, no joint dot."""
+    _line(draw, x1, y1, x2, y2)
 
 
-def _dot(draw, cx, cy, r=JOINT_RADIUS):
-    """Small filled circle for hands/feet — gives the figure clean termination."""
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=LINE_COLOR)
+def _line(draw, x1, y1, x2, y2, width=STROKE_WIDTH):
+    """Straight line with rounded caps."""
+    draw.line([(x1, y1), (x2, y2)], fill=STROKE_COLOR, width=width)
+    # Rounded end caps via small circles — keeps joints smooth
+    r = width / 2
+    draw.ellipse([x1 - r, y1 - r, x1 + r, y1 + r], fill=STROKE_COLOR)
+    draw.ellipse([x2 - r, y2 - r, x2 + r, y2 + r], fill=STROKE_COLOR)
 
 
-def _arc_line(draw, x1, y1, xc, yc, x2, y2, width=LINE_WIDTH):
-    """Draw a bent line through (x1,y1) -> (xc,yc) -> (x2,y2) with smooth corner.
-    The corner is rounded via the curve joint.
-    """
-    draw.line([(x1, y1), (xc, yc), (x2, y2)], fill=LINE_COLOR, width=width, joint="curve")
-    # End caps
-    draw.ellipse([x1 - width/2, y1 - width/2, x1 + width/2, y1 + width/2], fill=LINE_COLOR)
-    draw.ellipse([x2 - width/2, y2 - width/2, x2 + width/2, y2 + width/2], fill=LINE_COLOR)
+# --- Pose functions ---
+# Each draws: head + spine + 2 arms + 2 legs
+# Arms attach at shoulder (cx, head_cy + HEAD_RADIUS + 8)
+# Legs attach at hip (cx + lean, head_cy + HEAD_RADIUS + 8 + 110)
 
-
-# ============================================================
-# Pose functions — each draws the character in one position
-# Coordinate system: (cx, cy) = head center. Body extends downward.
-# Body height (head to feet): ~360px (was 280)
-# ============================================================
-
-def pose_standing_tall(draw, cx, cy):
-    """Standing upright, arms at sides."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)  # spine
+def pose_standing_tall(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
     # arms hang straight down
-    _line(draw, cx - 4, cy + 90, cx - 50, cy + 200)
-    _line(draw, cx + 4, cy + 90, cx + 50, cy + 200)
-    _dot(draw, cx - 50, cy + 200)
-    _dot(draw, cx + 50, cy + 200)
+    _draw_limb(draw, cx, shoulder_y, cx - 35, shoulder_y + 95)
+    _draw_limb(draw, cx, shoulder_y, cx + 35, shoulder_y + 95)
     # legs straight
-    _line(draw, cx, cy + 240, cx - 38, cy + 360)
-    _line(draw, cx, cy + 240, cx + 38, cy + 360)
-    _dot(draw, cx - 38, cy + 360)
-    _dot(draw, cx + 38, cy + 360)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
 
 
-def pose_walking(draw, cx, cy):
-    """Mid-stride, leaning forward."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    # curved spine leaning forward
-    _curve(draw, [(cx, cy + HEAD_RADIUS), (cx + 14, cy + 130), (cx + 8, cy + 240)])
-    # back arm swinging forward
-    _arc_line(draw, cx - 4, cy + 95, cx + 18, cy + 130, cx + 32, cy + 165)
-    # front arm swinging back
-    _arc_line(draw, cx + 4, cy + 95, cx - 18, cy + 140, cx - 38, cy + 175)
-    _dot(draw, cx + 32, cy + 165)
-    _dot(draw, cx - 38, cy + 175)
-    # back leg bent at knee
-    _arc_line(draw, cx + 8, cy + 240, cx - 22, cy + 300, cx - 60, cy + 320)
-    # front leg extended forward
-    _arc_line(draw, cx + 8, cy + 240, cx + 38, cy + 310, cx + 60, cy + 355)
-    _dot(draw, cx - 60, cy + 320)
-    _dot(draw, cx + 60, cy + 355)
+def pose_walking(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy, lean=8)
+    # arms swinging
+    _draw_limb(draw, cx + 8, shoulder_y, cx + 35, shoulder_y + 90)
+    _draw_limb(draw, cx + 8, shoulder_y, cx - 30, shoulder_y + 95)
+    # legs mid-stride
+    _draw_limb(draw, cx + 8, hip_y, cx - 30, hip_y + 110)
+    _draw_limb(draw, cx + 8, hip_y, cx + 35, hip_y + 105)
 
 
-def pose_running(draw, cx, cy):
-    """Running hard, body tilted forward."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + HEAD_RADIUS), (cx + 22, cy + 130), (cx + 28, cy + 240)])
+def pose_running(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy, lean=15)
     # arms pumping hard
-    _arc_line(draw, cx - 4, cy + 95, cx - 25, cy + 120, cx - 45, cy + 145)
-    _arc_line(draw, cx + 4, cy + 95, cx + 30, cy + 130, cx + 55, cy + 160)
-    _dot(draw, cx - 45, cy + 145)
-    _dot(draw, cx + 55, cy + 160)
-    # legs in sprint positions
-    _arc_line(draw, cx + 28, cy + 240, cx - 20, cy + 280, cx - 70, cy + 260)
-    _arc_line(draw, cx + 28, cy + 240, cx + 55, cy + 310, cx + 80, cy + 355)
-    _dot(draw, cx - 70, cy + 260)
-    _dot(draw, cx + 80, cy + 355)
+    _draw_limb(draw, cx + 15, shoulder_y, cx - 25, shoulder_y + 70)
+    _draw_limb(draw, cx + 15, shoulder_y, cx + 45, shoulder_y + 80)
+    # legs sprint
+    _draw_limb(draw, cx + 15, hip_y, cx - 40, hip_y + 80)
+    _draw_limb(draw, cx + 15, hip_y, cx + 50, hip_y + 105)
 
 
-def pose_sitting_ground(draw, cx, cy):
-    """Sitting on ground, knees up, head down."""
-    _circle(draw, cx, cy + 50, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + 50 + HEAD_RADIUS), (cx + 8, cy + 130), (cx + 12, cy + 200)])
-    # arms wrapped around knees
-    _arc_line(draw, cx - 4, cy + 100, cx - 38, cy + 160, cx - 60, cy + 220)
-    _arc_line(draw, cx + 4, cy + 100, cx + 38, cy + 160, cx + 60, cy + 220)
-    _dot(draw, cx - 60, cy + 220)
-    _dot(draw, cx + 60, cy + 220)
-    # legs bent up to chest
-    _arc_line(draw, cx + 12, cy + 200, cx - 35, cy + 280, cx - 60, cy + 220)
-    _arc_line(draw, cx + 12, cy + 200, cx + 48, cy + 280, cx + 60, cy + 220)
+def pose_sitting_ground(draw, cx, head_cy):
+    # Sitting on ground — figure is lower
+    head_cy = head_cy + 60
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 90
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy, lean=5)
+    # arms forward around knees
+    _draw_limb(draw, cx + 5, shoulder_y, cx - 40, shoulder_y + 100)
+    _draw_limb(draw, cx + 5, shoulder_y, cx + 40, shoulder_y + 100)
+    # legs bent up
+    _draw_limb(draw, cx + 5, hip_y, cx - 45, hip_y + 70)
+    _draw_limb(draw, cx + 5, hip_y, cx + 45, hip_y + 70)
 
 
-def pose_kneeling(draw, cx, cy):
-    """One knee on ground, head bowed."""
-    _circle(draw, cx, cy + 40, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + 40 + HEAD_RADIUS), (cx + 6, cy + 120), (cx + 8, cy + 220)])
-    # both arms reaching forward/down
-    _arc_line(draw, cx - 4, cy + 100, cx - 22, cy + 180, cx - 38, cy + 220)
-    _arc_line(draw, cx + 4, cy + 100, cx + 22, cy + 180, cx + 38, cy + 220)
-    _dot(draw, cx - 38, cy + 220)
-    _dot(draw, cx + 38, cy + 220)
-    # one leg kneeling, one forward
-    _arc_line(draw, cx + 8, cy + 220, cx - 30, cy + 320, cx - 30, cy + 360)
-    _arc_line(draw, cx + 8, cy + 220, cx + 48, cy + 290, cx + 85, cy + 305)
-    _dot(draw, cx - 30, cy + 360)
-    _dot(draw, cx + 85, cy + 305)
+def pose_kneeling(draw, cx, head_cy):
+    head_cy = head_cy + 30
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 100
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy, lean=4)
+    # arms reaching down
+    _draw_limb(draw, cx + 4, shoulder_y, cx - 30, shoulder_y + 110)
+    _draw_limb(draw, cx + 4, shoulder_y, cx + 30, shoulder_y + 110)
+    # one knee down, one forward
+    _draw_limb(draw, cx + 4, hip_y, cx - 25, hip_y + 130)
+    _draw_limb(draw, cx + 4, hip_y, cx + 50, hip_y + 90)
 
 
-def pose_looking_up(draw, cx, cy):
-    """Standing, head tilted back, looking at sky."""
-    _circle(draw, cx, cy - 12, HEAD_RADIUS)
-    _line(draw, cx, cy - 12 + HEAD_RADIUS, cx, cy + 240)
-    _line(draw, cx - 4, cy + 90, cx - 38, cy + 200)
-    _line(draw, cx + 4, cy + 90, cx + 38, cy + 200)
-    _dot(draw, cx - 38, cy + 200)
-    _dot(draw, cx + 38, cy + 200)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
+def pose_looking_up(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy - 10)
+    _draw_spine(draw, cx, head_cy)
+    _draw_limb(draw, cx, shoulder_y, cx - 35, shoulder_y + 95)
+    _draw_limb(draw, cx, shoulder_y, cx + 35, shoulder_y + 95)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
 
 
-def pose_climbing(draw, cx, cy):
-    """Reaching up, climbing."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + HEAD_RADIUS), (cx + 8, cy + 130), (cx, cy + 240)])
-    # one arm reaching straight up
-    _line(draw, cx - 4, cy + 80, cx - 38, cy + 10)
-    # other arm pulling down
-    _arc_line(draw, cx + 4, cy + 95, cx + 28, cy + 150, cx + 32, cy + 180)
-    _dot(draw, cx - 38, cy + 10)
-    _dot(draw, cx + 32, cy + 180)
-    # legs in climbing stance
-    _arc_line(draw, cx, cy + 240, cx - 32, cy + 305, cx - 60, cy + 320)
-    _arc_line(draw, cx, cy + 240, cx + 25, cy + 290, cx + 55, cy + 350)
-    _dot(draw, cx - 60, cy + 320)
-    _dot(draw, cx + 55, cy + 350)
+def pose_climbing(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy, lean=6)
+    # one arm reaching up
+    _draw_limb(draw, cx + 6, shoulder_y, cx - 25, shoulder_y - 50)
+    _draw_limb(draw, cx + 6, shoulder_y, cx + 30, shoulder_y + 60)
+    # legs climbing
+    _draw_limb(draw, cx + 6, hip_y, cx - 30, hip_y + 90)
+    _draw_limb(draw, cx + 6, hip_y, cx + 35, hip_y + 105)
 
 
-def pose_pointing_forward(draw, cx, cy):
-    """One arm extended forward — direction, purpose."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    _line(draw, cx - 4, cy + 95, cx - 38, cy + 200)
-    _dot(draw, cx - 38, cy + 200)
-    # front arm pointing forward (horizontal)
-    _line(draw, cx + 4, cy + 95, cx + 100, cy + 110)
-    _dot(draw, cx + 100, cy + 110)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
+def pose_pointing_forward(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
+    # one arm pointing forward (horizontal)
+    _draw_limb(draw, cx, shoulder_y, cx - 35, shoulder_y + 95)
+    _draw_limb(draw, cx, shoulder_y, cx + 90, shoulder_y)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
 
 
-def pose_pushing_boulder(draw, cx, cy):
-    """Leaning forward, both hands pushing an invisible boulder."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + HEAD_RADIUS), (cx + 28, cy + 130), (cx + 32, cy + 240)])
-    # both arms forward, pushing
-    _arc_line(draw, cx - 4, cy + 95, cx + 60, cy + 125, cx + 105, cy + 130)
-    _arc_line(draw, cx + 4, cy + 95, cx + 65, cy + 145, cx + 110, cy + 150)
-    _dot(draw, cx + 105, cy + 130)
-    _dot(draw, cx + 110, cy + 150)
-    # legs in pushing stance
-    _arc_line(draw, cx + 32, cy + 240, cx - 10, cy + 310, cx - 35, cy + 355)
-    _arc_line(draw, cx + 32, cy + 240, cx + 40, cy + 315, cx + 30, cy + 360)
-    _dot(draw, cx - 35, cy + 355)
-    _dot(draw, cx + 30, cy + 360)
+def pose_pushing_boulder(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy, lean=20)
+    # both arms forward pushing
+    _draw_limb(draw, cx + 20, shoulder_y, cx + 80, shoulder_y + 20)
+    _draw_limb(draw, cx + 20, shoulder_y, cx + 85, shoulder_y + 40)
+    # legs braced
+    _draw_limb(draw, cx + 20, hip_y, cx - 20, hip_y + 110)
+    _draw_limb(draw, cx + 20, hip_y, cx + 40, hip_y + 115)
     # boulder
-    _circle(draw, cx + 170, cy + 160, 60)
+    draw.ellipse([cx + 110, shoulder_y - 20, cx + 220, shoulder_y + 90],
+                 outline=STROKE_COLOR, width=STROKE_WIDTH)
 
 
-def pose_carrying_load(draw, cx, cy):
-    """Walking with a heavy load on back."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + HEAD_RADIUS), (cx + 14, cy + 130), (cx + 10, cy + 240)])
-    _arc_line(draw, cx - 4, cy + 95, cx - 22, cy + 145, cx - 28, cy + 180)
-    _arc_line(draw, cx + 4, cy + 95, cx + 22, cy + 145, cx + 28, cy + 180)
-    _dot(draw, cx - 28, cy + 180)
-    _dot(draw, cx + 28, cy + 180)
-    _arc_line(draw, cx + 10, cy + 240, cx - 22, cy + 310, cx - 40, cy + 355)
-    _arc_line(draw, cx + 10, cy + 240, cx + 30, cy + 305, cx + 50, cy + 350)
-    _dot(draw, cx - 40, cy + 355)
-    _dot(draw, cx + 50, cy + 350)
-    # the load — square block on shoulders
-    draw.rectangle([cx - 60, cy - 40, cx + 12, cy + 32], outline=LINE_COLOR, width=LINE_WIDTH)
+def pose_carrying_load(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy, lean=10)
+    # arms up to load
+    _draw_limb(draw, cx + 10, shoulder_y, cx - 30, shoulder_y - 30)
+    _draw_limb(draw, cx + 10, shoulder_y, cx + 30, shoulder_y - 30)
+    # walking legs
+    _draw_limb(draw, cx + 10, hip_y, cx - 25, hip_y + 110)
+    _draw_limb(draw, cx + 10, hip_y, cx + 35, hip_y + 105)
+    # load on back
+    draw.rectangle([cx - 50, head_cy - 50, cx + 30, head_cy + 10],
+                   outline=STROKE_COLOR, width=STROKE_WIDTH)
 
 
-def pose_standing_alone_hill(draw, cx, cy):
-    """Standing on top of a hill."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    _line(draw, cx - 4, cy + 95, cx - 42, cy + 200)
-    _line(draw, cx + 4, cy + 95, cx + 42, cy + 200)
-    _dot(draw, cx - 42, cy + 200)
-    _dot(draw, cx + 42, cy + 200)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
-    # hill
-    draw.line([(60, 690), (cx, 530), (1220, 690)], fill=MUTED, width=4, joint="curve")
+def pose_standing_alone_hill(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
+    _draw_limb(draw, cx, shoulder_y, cx - 35, shoulder_y + 95)
+    _draw_limb(draw, cx, shoulder_y, cx + 35, shoulder_y + 95)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
+    # hill — gentle curve
+    draw.line([(60, 690), (cx, 580), (1220, 690)], fill=MUTED, width=3, joint="curve")
 
 
-def pose_facing_wall(draw, cx, cy):
-    """Facing a wall."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    # both hands touching wall
-    _arc_line(draw, cx - 4, cy + 95, cx - 38, cy + 100, cx - 65, cy + 110)
-    _arc_line(draw, cx + 4, cy + 95, cx - 30, cy + 120, cx - 65, cy + 130)
-    _dot(draw, cx - 65, cy + 110)
-    _dot(draw, cx - 65, cy + 130)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
+def pose_facing_wall(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
+    # hands on wall
+    _draw_limb(draw, cx, shoulder_y, cx - 50, shoulder_y + 10)
+    _draw_limb(draw, cx, shoulder_y, cx - 50, shoulder_y + 30)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
     # wall on left
-    draw.line([(cx - 90, cy - 100), (cx - 90, cy + 360)], fill=LINE_COLOR, width=10)
+    draw.line([(cx - 75, head_cy - 80), (cx - 75, hip_y + 130)],
+              fill=STROKE_COLOR, width=8)
 
 
-def pose_arms_crossed(draw, cx, cy):
-    """Standing, arms crossed — defiance."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
+def pose_arms_crossed(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
     # arms crossed over chest
-    _arc_line(draw, cx - 4, cy + 95, cx + 28, cy + 130, cx + 35, cy + 145)
-    _arc_line(draw, cx + 4, cy + 95, cx - 28, cy + 130, cx - 35, cy + 145)
-    _dot(draw, cx + 35, cy + 145)
-    _dot(draw, cx - 35, cy + 145)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
+    _draw_limb(draw, cx, shoulder_y, cx + 35, shoulder_y + 50)
+    _draw_limb(draw, cx, shoulder_y, cx - 35, shoulder_y + 50)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
 
 
-def pose_falling(draw, cx, cy):
-    """Mid-fall, body horizontal."""
-    _circle(draw, cx + 100, cy + 130, HEAD_RADIUS)
-    _line(draw, cx + 100 - HEAD_RADIUS, cy + 130, cx - 60, cy + 120)
-    # arms splayed upward
-    _line(draw, cx + 40, cy + 125, cx + 40, cy + 60)
-    _line(draw, cx + 10, cy + 125, cx + 10, cy + 65)
-    _dot(draw, cx + 40, cy + 60)
-    _dot(draw, cx + 10, cy + 65)
+def pose_falling(draw, cx, head_cy):
+    # Horizontal figure — falling
+    head_cy = head_cy + 80
+    _draw_head(draw, cx + 90, head_cy)
+    # spine horizontal
+    _line(draw, cx + 90 - HEAD_RADIUS, head_cy, cx - 60, head_cy + 5)
+    # arms splayed
+    _draw_limb(draw, cx + 30, head_cy, cx + 30, head_cy - 50)
+    _draw_limb(draw, cx, head_cy, cx, head_cy + 50)
     # legs splayed
-    _line(draw, cx - 35, cy + 120, cx - 35, cy + 60)
-    _line(draw, cx - 60, cy + 120, cx - 60, cy + 65)
-    _dot(draw, cx - 35, cy + 60)
-    _dot(draw, cx - 60, cy + 65)
+    _draw_limb(draw, cx - 30, head_cy + 5, cx - 30, head_cy - 45)
+    _draw_limb(draw, cx - 60, head_cy + 5, cx - 60, head_cy + 50)
 
 
-def pose_rising_up(draw, cx, cy):
-    """Halfway up from ground, one hand on floor."""
-    _circle(draw, cx, cy + 80, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + 80 + HEAD_RADIUS), (cx + 12, cy + 170), (cx + 18, cy + 230)])
-    # one hand on ground for support
-    _arc_line(draw, cx - 4, cy + 120, cx - 38, cy + 220, cx - 60, cy + 250)
-    # other arm reaching forward
-    _arc_line(draw, cx + 4, cy + 120, cx + 35, cy + 145, cx + 55, cy + 165)
-    _dot(draw, cx - 60, cy + 250)
-    _dot(draw, cx + 55, cy + 165)
-    # one knee down, one foot planted
-    _arc_line(draw, cx + 18, cy + 230, cx - 20, cy + 320, cx - 20, cy + 360)
-    _arc_line(draw, cx + 18, cy + 230, cx + 55, cy + 290, cx + 80, cy + 350)
-    _dot(draw, cx - 20, cy + 360)
-    _dot(draw, cx + 80, cy + 350)
+def pose_rising_up(draw, cx, head_cy):
+    head_cy = head_cy + 50
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 100
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy, lean=8)
+    # one hand on ground
+    _draw_limb(draw, cx + 8, shoulder_y, cx - 45, shoulder_y + 110)
+    _draw_limb(draw, cx + 8, shoulder_y, cx + 40, shoulder_y + 50)
+    # one knee down, one up
+    _draw_limb(draw, cx + 8, hip_y, cx - 25, hip_y + 130)
+    _draw_limb(draw, cx + 8, hip_y, cx + 45, hip_y + 80)
 
 
-def pose_fist_clenched(draw, cx, cy):
-    """Standing, fists clenched at sides — resolve."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    # arms bent slightly, fists at hip level
-    _arc_line(draw, cx - 4, cy + 95, cx - 42, cy + 160, cx - 38, cy + 200)
-    _arc_line(draw, cx + 4, cy + 95, cx + 42, cy + 160, cx + 38, cy + 200)
-    # fists as larger filled circles
-    _dot(draw, cx - 38, cy + 200, r=12)
-    _dot(draw, cx + 38, cy + 200, r=12)
-    _line(draw, cx, cy + 240, cx - 36, cy + 360)
-    _line(draw, cx, cy + 240, cx + 36, cy + 360)
-    _dot(draw, cx - 36, cy + 360)
-    _dot(draw, cx + 36, cy + 360)
+def pose_fist_clenched(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
+    # arms bent, fists at hips
+    _draw_limb(draw, cx, shoulder_y, cx - 35, shoulder_y + 70)
+    _draw_limb(draw, cx - 35, shoulder_y + 70, cx - 25, shoulder_y + 110)
+    _draw_limb(draw, cx, shoulder_y, cx + 35, shoulder_y + 70)
+    _draw_limb(draw, cx + 35, shoulder_y + 70, cx + 25, shoulder_y + 110)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
 
 
-def pose_meditating(draw, cx, cy):
-    """Cross-legged sitting, hands on knees."""
-    _circle(draw, cx, cy + 25, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + 25 + HEAD_RADIUS), (cx + 4, cy + 110), (cx + 6, cy + 180)])
-    # arms down to knees
-    _arc_line(draw, cx - 4, cy + 100, cx - 32, cy + 175, cx - 60, cy + 215)
-    _arc_line(draw, cx + 4, cy + 100, cx + 32, cy + 175, cx + 60, cy + 215)
-    _dot(draw, cx - 60, cy + 215)
-    _dot(draw, cx + 60, cy + 215)
+def pose_meditating(draw, cx, head_cy):
+    head_cy = head_cy + 30
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 90
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
+    # arms to knees
+    _draw_limb(draw, cx, shoulder_y, cx - 50, shoulder_y + 90)
+    _draw_limb(draw, cx, shoulder_y, cx + 50, shoulder_y + 90)
     # crossed legs
-    _arc_line(draw, cx + 6, cy + 180, cx - 60, cy + 245, cx + 12, cy + 270)
-    _arc_line(draw, cx + 6, cy + 180, cx + 60, cy + 245, cx - 12, cy + 270)
+    _draw_limb(draw, cx, hip_y, cx - 50, shoulder_y + 110)
+    _draw_limb(draw, cx, hip_y, cx + 50, shoulder_y + 110)
 
 
-def pose_writing(draw, cx, cy):
-    """Sitting, hunched forward, writing in book."""
-    _circle(draw, cx, cy + 50, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + 50 + HEAD_RADIUS), (cx + 12, cy + 130), (cx + 14, cy + 180)])
-    # both arms forward toward book
-    _arc_line(draw, cx - 4, cy + 100, cx - 28, cy + 195, cx - 38, cy + 220)
-    _arc_line(draw, cx + 4, cy + 100, cx + 28, cy + 195, cx + 38, cy + 220)
-    _dot(draw, cx - 38, cy + 220)
-    _dot(draw, cx + 38, cy + 220)
-    # legs crossed under
-    _arc_line(draw, cx + 14, cy + 180, cx - 48, cy + 245, cx + 8, cy + 265)
-    _arc_line(draw, cx + 14, cy + 180, cx + 50, cy + 245, cx - 8, cy + 265)
+def pose_writing(draw, cx, head_cy):
+    head_cy = head_cy + 40
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 90
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy, lean=8)
+    # arms forward to book
+    _draw_limb(draw, cx + 8, shoulder_y, cx - 30, shoulder_y + 90)
+    _draw_limb(draw, cx + 8, shoulder_y, cx + 30, shoulder_y + 90)
+    # crossed legs
+    _draw_limb(draw, cx + 8, hip_y, cx - 45, hip_y + 70)
+    _draw_limb(draw, cx + 8, hip_y, cx + 45, hip_y + 70)
     # book on lap
-    draw.rectangle([cx - 50, cy + 215, cx + 50, cy + 245], outline=LINE_COLOR, width=4)
+    draw.rectangle([cx - 45, shoulder_y + 85, cx + 45, shoulder_y + 100],
+                   outline=STROKE_COLOR, width=3)
 
 
-def pose_standing_window(draw, cx, cy):
-    """Standing by a window."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    # one arm up near head (touching window frame)
-    _arc_line(draw, cx - 4, cy + 95, cx - 35, cy + 65, cx - 50, cy + 50)
-    _line(draw, cx + 4, cy + 95, cx + 32, cy + 200)
-    _dot(draw, cx - 50, cy + 50)
-    _dot(draw, cx + 32, cy + 200)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
-    # window frame on left
-    draw.rectangle([cx - 150, cy - 100, cx - 30, cy + 130], outline=LINE_COLOR, width=4)
-    draw.line([(cx - 90, cy - 100), (cx - 90, cy + 130)], fill=LINE_COLOR, width=3)
+def pose_standing_window(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
+    _draw_limb(draw, cx, shoulder_y, cx - 40, shoulder_y - 20)
+    _draw_limb(draw, cx, shoulder_y, cx + 35, shoulder_y + 95)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
+    # window on left
+    draw.rectangle([cx - 130, head_cy - 80, cx - 30, head_cy + 120],
+                   outline=STROKE_COLOR, width=3)
 
 
-def pose_staring_mirror(draw, cx, cy):
-    """Standing facing a mirror."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    # both arms raised slightly, hands near face
-    _arc_line(draw, cx - 4, cy + 95, cx - 30, cy + 65, cx - 25, cy + 35)
-    _arc_line(draw, cx + 4, cy + 95, cx + 30, cy + 65, cx + 25, cy + 35)
-    _dot(draw, cx - 25, cy + 35)
-    _dot(draw, cx + 25, cy + 35)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
+def pose_staring_mirror(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
+    # hands near face
+    _draw_limb(draw, cx, shoulder_y, cx - 30, shoulder_y - 20)
+    _draw_limb(draw, cx, shoulder_y, cx + 30, shoulder_y - 20)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
     # mirror on right
-    draw.rectangle([cx + 90, cy - 70, cx + 180, cy + 200], outline=LINE_COLOR, width=4)
+    draw.rectangle([cx + 80, head_cy - 60, cx + 170, head_cy + 200],
+                   outline=STROKE_COLOR, width=3)
 
 
-def pose_walking_alone_path(draw, cx, cy):
-    """Walking alone on a long path."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + HEAD_RADIUS), (cx + 12, cy + 130), (cx + 6, cy + 240)])
-    _arc_line(draw, cx - 4, cy + 95, cx + 18, cy + 145, cx + 32, cy + 175)
-    _arc_line(draw, cx + 4, cy + 95, cx - 18, cy + 150, cx - 38, cy + 180)
-    _dot(draw, cx + 32, cy + 175)
-    _dot(draw, cx - 38, cy + 180)
-    _arc_line(draw, cx + 6, cy + 240, cx - 22, cy + 305, cx - 55, cy + 320)
-    _arc_line(draw, cx + 6, cy + 240, cx + 35, cy + 305, cx + 60, cy + 355)
-    _dot(draw, cx - 55, cy + 320)
-    _dot(draw, cx + 60, cy + 355)
-    # path stretching forward
-    draw.line([(60, 700), (cx, 580), (1220, 510)], fill=MUTED, width=4, joint="curve")
+def pose_walking_alone_path(draw, cx, head_cy):
+    pose_walking(draw, cx, head_cy)
+    # path
+    draw.line([(60, 700), (cx, 580), (1220, 510)], fill=MUTED, width=3, joint="curve")
 
 
-def pose_bowing_head(draw, cx, cy):
-    """Standing, head bowed."""
-    _circle(draw, cx, cy + 35, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + 35 + HEAD_RADIUS), (cx + 8, cy + 130), (cx, cy + 240)])
-    _line(draw, cx - 4, cy + 95, cx - 38, cy + 200)
-    _line(draw, cx + 4, cy + 95, cx + 38, cy + 200)
-    _dot(draw, cx - 38, cy + 200)
-    _dot(draw, cx + 38, cy + 200)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
+def pose_bowing_head(draw, cx, head_cy):
+    head_cy = head_cy + 25
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy, lean=4)
+    _draw_limb(draw, cx + 4, shoulder_y, cx - 35, shoulder_y + 95)
+    _draw_limb(draw, cx + 4, shoulder_y, cx + 35, shoulder_y + 95)
+    _draw_limb(draw, cx + 4, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx + 4, hip_y, cx + 30, hip_y + 115)
 
 
-def pose_sun_rising(draw, cx, cy):
-    """Standing, facing a rising sun."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    _line(draw, cx - 4, cy + 95, cx - 38, cy + 200)
-    _line(draw, cx + 4, cy + 95, cx + 38, cy + 200)
-    _dot(draw, cx - 38, cy + 200)
-    _dot(draw, cx + 38, cy + 200)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
+def pose_sun_rising(draw, cx, head_cy):
+    pose_standing_tall(draw, cx, head_cy)
     # sun on right
-    _circle(draw, cx + 290, cy + 110, 55, width=5)
-    draw.line([(60, 620), (1220, 620)], fill=MUTED, width=4)
+    draw.ellipse([cx + 230, head_cy + 50, cx + 340, head_cy + 160],
+                 outline=STROKE_COLOR, width=4)
+    draw.line([(60, head_cy + 200), (1220, head_cy + 200)], fill=MUTED, width=3)
 
 
-def pose_empty_chair(draw, cx, cy):
-    """An empty chair — absence, reflection on what was."""
-    # No character in this frame — just the chair
-    # Chair seat
-    draw.rectangle([cx - 60, cy + 160, cx + 60, cy + 180], outline=LINE_COLOR, width=LINE_WIDTH)
-    # Chair back
-    draw.line([(cx - 60, cy + 160), (cx - 60, cy + 20)], fill=LINE_COLOR, width=LINE_WIDTH)
-    # Front legs
-    draw.line([(cx + 60, cy + 180), (cx + 60, cy + 300)], fill=LINE_COLOR, width=LINE_WIDTH)
-    draw.line([(cx + 50, cy + 180), (cx + 50, cy + 300)], fill=LINE_COLOR, width=LINE_WIDTH)
-    # Back legs
-    draw.line([(cx - 60, cy + 180), (cx - 60, cy + 300)], fill=LINE_COLOR, width=LINE_WIDTH)
-    draw.line([(cx - 50, cy + 180), (cx - 50, cy + 300)], fill=LINE_COLOR, width=LINE_WIDTH)
+def pose_empty_chair(draw, cx, head_cy):
+    # No character — just an empty chair
+    chair_y = head_cy + 100
+    draw.rectangle([cx - 50, chair_y, cx + 50, chair_y + 20],
+                   outline=STROKE_COLOR, width=STROKE_WIDTH)
+    draw.line([(cx - 50, chair_y), (cx - 50, chair_y - 120)],
+              fill=STROKE_COLOR, width=STROKE_WIDTH)
+    draw.line([(cx + 50, chair_y + 20), (cx + 50, chair_y + 140)],
+              fill=STROKE_COLOR, width=STROKE_WIDTH)
+    draw.line([(cx - 50, chair_y + 20), (cx - 50, chair_y + 140)],
+              fill=STROKE_COLOR, width=STROKE_WIDTH)
 
 
-def pose_clock_waiting(draw, cx, cy):
-    """Standing, looking at a clock."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    # one arm raised toward clock
-    _arc_line(draw, cx - 4, cy + 95, cx - 35, cy + 90, cx - 60, cy + 85)
-    _line(draw, cx + 4, cy + 95, cx + 32, cy + 200)
-    _dot(draw, cx - 60, cy + 85)
-    _dot(draw, cx + 32, cy + 200)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
+def pose_clock_waiting(draw, cx, head_cy):
+    pose_standing_tall(draw, cx, head_cy)
     # clock on upper left
-    _circle(draw, cx - 145, cy - 50, 50, width=5)
-    # clock hands
-    draw.line([(cx - 145, cy - 50), (cx - 145, cy - 85)], fill=LINE_COLOR, width=5)
-    draw.line([(cx - 145, cy - 50), (cx - 115, cy - 50)], fill=LINE_COLOR, width=5)
-    # center dot
-    _dot(draw, cx - 145, cy - 50, r=4)
+    draw.ellipse([cx - 150, head_cy - 60, cx - 50, head_cy + 40],
+                 outline=STROKE_COLOR, width=4)
+    # hands
+    _line(draw, cx - 100, head_cy - 10, cx - 100, head_cy - 40, width=3)
+    _line(draw, cx - 100, head_cy - 10, cx - 75, head_cy - 10, width=3)
 
 
-def pose_holding_light(draw, cx, cy):
-    """Standing, holding up a small light/candle — hope."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
+def pose_holding_light(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
     # one arm raised holding light
-    _arc_line(draw, cx - 4, cy + 90, cx - 18, cy + 35, cx - 25, cy + 5)
-    _line(draw, cx + 4, cy + 95, cx + 32, cy + 200)
-    _dot(draw, cx + 32, cy + 200)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
-    # small light/candle above hand
-    _circle(draw, cx - 25, cy - 20, 20, width=4)
+    _draw_limb(draw, cx, shoulder_y, cx - 25, shoulder_y - 60)
+    _draw_limb(draw, cx, shoulder_y, cx + 35, shoulder_y + 95)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
+    # light
+    draw.ellipse([cx - 45, head_cy - 90, cx - 5, head_cy - 50],
+                 outline=STROKE_COLOR, width=4)
 
 
-def pose_standing_mountain_top(draw, cx, cy):
-    """On a mountain peak, looking down at the world."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    _line(draw, cx - 4, cy + 95, cx - 42, cy + 200)
-    _line(draw, cx + 4, cy + 95, cx + 42, cy + 200)
-    _dot(draw, cx - 42, cy + 200)
-    _dot(draw, cx + 42, cy + 200)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
-    # mountain peak silhouette
-    draw.line([(40, 700), (cx, 530), (1240, 700)], fill=MUTED, width=5, joint="curve")
+def pose_standing_mountain_top(draw, cx, head_cy):
+    pose_standing_tall(draw, cx, head_cy)
+    # mountain peak
+    draw.line([(40, 700), (cx, 540), (1240, 700)], fill=MUTED, width=4, joint="curve")
 
 
-def pose_face_down(draw, cx, cy):
-    """Lying face down on the ground — defeat."""
-    # horizontal body on ground
-    _circle(draw, cx - 120, cy + 230, HEAD_RADIUS)
-    _line(draw, cx - 120 + HEAD_RADIUS, cy + 230, cx + 90, cy + 235)
+def pose_face_down(draw, cx, head_cy):
+    # Lying down
+    head_cy = head_cy + 130
+    _draw_head(draw, cx - 110, head_cy)
+    _line(draw, cx - 110 + HEAD_RADIUS, head_cy, cx + 90, head_cy + 5)
     # arms limp
-    _line(draw, cx - 75, cy + 235, cx - 75, cy + 280)
-    _line(draw, cx - 40, cy + 235, cx - 40, cy + 275)
-    _dot(draw, cx - 75, cy + 280)
-    _dot(draw, cx - 40, cy + 275)
+    _draw_limb(draw, cx - 60, head_cy, cx - 60, head_cy + 45)
+    _draw_limb(draw, cx - 20, head_cy, cx - 20, head_cy + 40)
     # legs limp
-    _line(draw, cx + 45, cy + 235, cx + 45, cy + 280)
-    _line(draw, cx + 80, cy + 235, cx + 80, cy + 275)
-    _dot(draw, cx + 45, cy + 280)
-    _dot(draw, cx + 80, cy + 275)
-    # ground line
-    draw.line([(40, cy + 290), (1240, cy + 290)], fill=LINE_COLOR, width=5)
+    _draw_limb(draw, cx + 40, head_cy + 5, cx + 40, head_cy + 45)
+    _draw_limb(draw, cx + 80, head_cy + 5, cx + 80, head_cy + 40)
+    # ground
+    draw.line([(40, head_cy + 50), (1240, head_cy + 50)], fill=STROKE_COLOR, width=4)
 
 
-def pose_two_paths(draw, cx, cy):
-    """Standing at a fork in the road."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    # arms gesturing left and right
-    _arc_line(draw, cx - 4, cy + 95, cx - 38, cy + 90, cx - 65, cy + 100)
-    _arc_line(draw, cx + 4, cy + 95, cx + 38, cy + 90, cx + 65, cy + 100)
-    _dot(draw, cx - 65, cy + 100)
-    _dot(draw, cx + 65, cy + 100)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
-    # two paths diverging
-    draw.line([(cx, 700), (cx - 280, 530)], fill=MUTED, width=4)
-    draw.line([(cx, 700), (cx + 280, 530)], fill=MUTED, width=4)
+def pose_two_paths(draw, cx, head_cy):
+    pose_standing_tall(draw, cx, head_cy)
+    # two diverging paths
+    draw.line([(cx, 700), (cx - 280, 530)], fill=MUTED, width=3)
+    draw.line([(cx, 700), (cx + 280, 530)], fill=MUTED, width=3)
 
 
-def pose_arms_raised(draw, cx, cy):
-    """Both arms raised up — triumph, surrender, or reaching."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    _arc_line(draw, cx - 4, cy + 90, cx - 25, cy + 25, cx - 35, cy - 5)
-    _arc_line(draw, cx + 4, cy + 90, cx + 25, cy + 25, cx + 35, cy - 5)
-    _dot(draw, cx - 35, cy - 5)
-    _dot(draw, cx + 35, cy - 5)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
+def pose_arms_raised(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
+    # both arms up
+    _draw_limb(draw, cx, shoulder_y, cx - 30, shoulder_y - 60)
+    _draw_limb(draw, cx, shoulder_y, cx + 30, shoulder_y - 60)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
 
 
-def pose_dark_room_alone(draw, cx, cy):
-    """Sitting alone in a dark room with a sliver of light."""
-    _circle(draw, cx, cy + 80, HEAD_RADIUS)
-    _curve(draw, [(cx, cy + 80 + HEAD_RADIUS), (cx + 8, cy + 170), (cx + 12, cy + 220)])
-    _arc_line(draw, cx - 4, cy + 120, cx - 28, cy + 195, cx - 38, cy + 225)
-    _arc_line(draw, cx + 4, cy + 120, cx + 28, cy + 195, cx + 38, cy + 225)
-    _dot(draw, cx - 38, cy + 225)
-    _dot(draw, cx + 38, cy + 225)
-    _arc_line(draw, cx + 12, cy + 220, cx - 38, cy + 280, cx - 38, cy + 320)
-    _arc_line(draw, cx + 12, cy + 220, cx + 38, cy + 280, cx + 38, cy + 320)
-    _dot(draw, cx - 38, cy + 320)
-    _dot(draw, cx + 38, cy + 320)
-    # window letting in a sliver of light
-    draw.rectangle([cx + 230, cy - 50, cx + 320, cy + 130], outline=LINE_COLOR, width=4)
-    draw.line([(cx + 275, cy + 110), (cx + 100, cy + 240)], fill=MUTED, width=3)
+def pose_dark_room_alone(draw, cx, head_cy):
+    pose_sitting_ground(draw, cx, head_cy)
+    # window with light beam
+    draw.rectangle([cx + 200, head_cy - 80, cx + 290, head_cy + 80],
+                   outline=STROKE_COLOR, width=3)
 
 
-def pose_handshake_self(draw, cx, cy):
-    """Both hands clasped together in front — commitment to self."""
-    _circle(draw, cx, cy, HEAD_RADIUS)
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    # both arms meeting in front of chest
-    _arc_line(draw, cx - 4, cy + 95, cx + 8, cy + 130, cx + 5, cy + 155)
-    _arc_line(draw, cx + 4, cy + 95, cx - 8, cy + 130, cx - 5, cy + 155)
-    _dot(draw, cx + 5, cy + 155, r=10)  # clasped hands as bigger dot
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
+def pose_handshake_self(draw, cx, head_cy):
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_head(draw, cx, head_cy)
+    _draw_spine(draw, cx, head_cy)
+    # hands clasped in front
+    _draw_limb(draw, cx, shoulder_y, cx + 15, shoulder_y + 60)
+    _draw_limb(draw, cx, shoulder_y, cx - 15, shoulder_y + 60)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
 
 
-def pose_looking_back(draw, cx, cy):
-    """Standing, head turned to look behind — regret or reflection."""
-    _circle(draw, cx - 18, cy, HEAD_RADIUS)  # head turned
-    _line(draw, cx, cy + HEAD_RADIUS, cx, cy + 240)
-    _line(draw, cx - 4, cy + 95, cx - 38, cy + 200)
-    _line(draw, cx + 4, cy + 95, cx + 38, cy + 200)
-    _dot(draw, cx - 38, cy + 200)
-    _dot(draw, cx + 38, cy + 200)
-    _line(draw, cx, cy + 240, cx - 32, cy + 360)
-    _line(draw, cx, cy + 240, cx + 32, cy + 360)
-    _dot(draw, cx - 32, cy + 360)
-    _dot(draw, cx + 32, cy + 360)
-    # faint footprints trailing behind
-    for fx, fy in [(cx - 150, 670), (cx - 195, 685), (cx - 240, 660)]:
-        _dot(draw, fx, fy, r=8)
+def pose_looking_back(draw, cx, head_cy):
+    # Head turned
+    _draw_head(draw, cx - 15, head_cy)
+    shoulder_y = head_cy + HEAD_RADIUS + 8
+    hip_y = shoulder_y + 110
+    _draw_spine(draw, cx, head_cy)
+    _draw_limb(draw, cx, shoulder_y, cx - 35, shoulder_y + 95)
+    _draw_limb(draw, cx, shoulder_y, cx + 35, shoulder_y + 95)
+    _draw_limb(draw, cx, hip_y, cx - 30, hip_y + 115)
+    _draw_limb(draw, cx, hip_y, cx + 30, hip_y + 115)
+    # footprints behind
+    for fx, fy in [(cx - 130, 670), (cx - 175, 685), (cx - 220, 660)]:
+        draw.ellipse([fx - 7, fy - 7, fx + 7, fy + 7], outline=STROKE_COLOR, width=3)
 
 
 # ============================================================
@@ -727,6 +598,97 @@ POSE_REGISTRY = {
 POSE_NAMES = list(POSE_REGISTRY.keys())
 
 
+# ============================================================
+# Openverse background texture fetcher — free CC images, no API key
+# ============================================================
+
+# Curated search terms for backgrounds that fit the motivation aesthetic
+BG_SEARCH_TERMS = [
+    "concrete wall texture",
+    "old paper texture",
+    "minimalist wall",
+    "dark stone wall",
+    "foggy mountain",
+    "empty room minimal",
+    "cloudy sky minimal",
+    "wood texture minimal",
+    "blackboard texture",
+    "desert landscape minimal",
+    "winter forest",
+    "empty road",
+    "lonely tree",
+    "minimalist architecture",
+    "stone wall old",
+]
+
+_bg_cache = {}  # cache URLs per search term to avoid re-fetching
+
+def _fetch_bg_image(search_term: str, cache_dir: str) -> str | None:
+    """Fetch a free CC-licensed background image from Openverse.
+    Returns local path, or None on failure.
+    """
+    if search_term in _bg_cache:
+        cached = _bg_cache[search_term]
+        if os.path.exists(cached):
+            return cached
+
+    try:
+        r = requests.get(
+            "https://api.openverse.org/v1/images/",
+            params={"q": search_term, "page_size": 5, "license_type": "all-cc"},
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return None
+        results = r.json().get("results", [])
+        if not results:
+            return None
+        # Try each result until one downloads successfully
+        for item in results[:3]:
+            url = item.get("url")
+            if not url:
+                continue
+            try:
+                img_r = requests.get(url, timeout=30)
+                if img_r.status_code == 200 and len(img_r.content) > 5000:
+                    out_path = os.path.join(cache_dir, f"bg_{hash(search_term) & 0xFFFFFFFF}.jpg")
+                    with open(out_path, "wb") as f:
+                        f.write(img_r.content)
+                    _bg_cache[search_term] = out_path
+                    return out_path
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[bg] Openverse fetch failed for '{search_term}': {e}")
+    return None
+
+
+def _prepare_background(bg_path: str | None, out_size: tuple[int, int]) -> Image.Image:
+    """Load and process background image. Returns a PIL Image.
+    If bg_path is None, returns a solid color fallback.
+    """
+    if bg_path and os.path.exists(bg_path):
+        try:
+            bg = Image.open(bg_path).convert("RGB")
+            # Resize to cover canvas
+            bg = bg.resize(out_size, Image.LANCZOS)
+            # Darken slightly so white text + stick figure pop
+            bg = ImageEnhance.Brightness(bg).enhance(0.85)
+            # Add white overlay for readability
+            overlay = Image.new("RGBA", out_size, (255, 255, 255, 90))
+            bg = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
+            return bg
+        except Exception as e:
+            print(f"[bg] failed to load bg image: {e}")
+
+    # Fallback: solid color
+    return Image.new("RGB", out_size, BG_FALLBACK)
+
+
+# ============================================================
+# Frame renderer — stick figure on background texture
+# ============================================================
+
 def render_pose_to_png(
     pose_name: str,
     out_path: str,
@@ -734,51 +696,58 @@ def render_pose_to_png(
     brand_pill: str = "DAILY DISCIPLINE",
     scene_num: int = 0,
     scene_total: int = 25,
+    bg_search_term: str | None = None,
+    bg_cache_dir: str | None = None,
 ) -> str:
     """Render one frame to PNG. Returns out_path.
 
-    Layout (horizontal 1280x720):
+    Layout (1280x720):
+      - Background: free CC texture from Openverse (or solid color fallback)
+      - Stick figure on left third (same character every frame)
+      - Caption text on right two-thirds
       - Brand pill top-left, scene counter top-right
-      - Stick figure centered (left half)
-      - Caption text on right half (wrapped, large bold)
-      - Accent bar under pill
     """
     if pose_name not in POSE_REGISTRY:
         pose_name = "standing_tall"
 
-    img = Image.new("RGB", CANVAS, BG)
+    # 1. Get background
+    bg_path = None
+    if bg_search_term and bg_cache_dir:
+        bg_path = _fetch_bg_image(bg_search_term, bg_cache_dir)
+    bg_img = _prepare_background(bg_path, CANVAS)
+
+    # 2. Create drawing context
+    img = bg_img.copy()
     draw = ImageDraw.Draw(img)
 
-    # --- Top: brand pill (left) ---
-    pill_text = brand_pill
+    # 3. Brand pill top-left
     pill_font = _font(22, bold=True, mono=True)
-    pill_w = int(draw.textlength(pill_text, font=pill_font)) + 32
+    pill_w = int(draw.textlength(brand_pill, font=pill_font)) + 32
     pill_h = 22 + 18
     draw.rounded_rectangle(
         [MARGIN, 50, MARGIN + pill_w, 50 + pill_h],
         radius=pill_h // 2, fill=ACCENT_TINT,
     )
-    draw.text((MARGIN + 16, 53), pill_text, font=pill_font, fill=ACCENT)
+    draw.text((MARGIN + 16, 53), brand_pill, font=pill_font, fill=ACCENT)
 
-    # --- Top: scene counter (right) ---
+    # 4. Scene counter top-right
     counter = f"{scene_num:02d} / {scene_total:02d}"
     c_font = _font(22, bold=True, mono=True)
     cw = int(draw.textlength(counter, font=c_font))
     draw.text((CANVAS[0] - MARGIN - cw, 53), counter, font=c_font, fill=MUTED)
 
-    # --- Center: stick figure on left half ---
+    # 5. Stick figure on left third
     pose_func = POSE_REGISTRY[pose_name]
-    fig_cx = CANVAS[0] // 4 + 30
-    fig_cy = 180  # head center — moved up to fit longer body
-    pose_func(draw, fig_cx, fig_cy)
+    fig_cx = CANVAS[0] // 4 + 20
+    pose_func(draw, fig_cx, FIGURE_HEAD_CY)
 
-    # --- Right half: caption text ---
+    # 6. Caption on right two-thirds
     if caption:
         snippet = caption[:140]
-        cap_font = _font(44, bold=True)
-        max_w = CANVAS[0] // 2 - MARGIN - 20
+        cap_font = _font(42, bold=True)
+        max_w = CANVAS[0] // 2 - MARGIN
         lines = _wrap_text(snippet, cap_font, draw, max_w)
-        line_h = int(44 * 1.18)
+        line_h = int(42 * 1.18)
         block_h = line_h * len(lines)
         start_y = (CANVAS[1] - block_h) // 2
         right_x = CANVAS[0] // 2 + 20
@@ -825,7 +794,7 @@ def svg_to_png(svg_path: str, png_path: str, width: int = None, height: int = No
 
 
 if __name__ == "__main__":
-    os.makedirs("/tmp/poses_v6", exist_ok=True)
+    os.makedirs("/tmp/poses_v7", exist_ok=True)
     test_captions = [
         "Discipline is choosing what you want most over what you want now.",
         "The body screams stop. The mind agrees. You ignore both.",
@@ -835,11 +804,13 @@ if __name__ == "__main__":
         "Years pass. You are unrecognizable.",
     ]
     for i, name in enumerate(POSE_NAMES[:6]):
-        out = f"/tmp/poses_v6/{name}.png"
+        out = f"/tmp/poses_v7/{name}.png"
         render_pose_to_png(
             name, out,
             caption=test_captions[i % len(test_captions)],
             scene_num=i + 1, scene_total=25,
+            bg_search_term=BG_SEARCH_TERMS[i % len(BG_SEARCH_TERMS)],
+            bg_cache_dir="/tmp/poses_v7",
         )
-        print(f"  OK {name}")
-    print(f"\nRendered 6 test poses to /tmp/poses_v6/")
+        print(f"  OK {name} ({os.path.getsize(out) // 1024} KB)")
+    print(f"\nRendered 6 test poses to /tmp/poses_v7/")
