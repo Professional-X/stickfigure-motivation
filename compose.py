@@ -1,8 +1,9 @@
 """Compose final video with ffmpeg.
 
 Pipeline:
-1. For each scene: build an MP4 with image + Ken Burns zoompan + scene narration.
-2. Concat all scene MP4s into one continuous video.
+1. For each scene: build an MP4 with STATIC still image + scene narration.
+   (No Ken Burns zoom — viewers hated it.)
+2. Concat all scene MP4s with 0.5s crossfade transitions.
 3. Mix in background music at lower volume.
 4. Burn in subtitles from ASS file.
 5. Output: final.mp4 (1280x720, H.264 + AAC).
@@ -30,17 +31,16 @@ def _run_ffmpeg(args: list[str], desc: str = ""):
 
 
 def build_scene_clip(image_path: str, audio_path: str, duration: float, out_path: str):
-    """Build a single scene MP4: still image with slow zoom + narration audio."""
-    fps = 25
-    frames = max(int(duration * fps), 1)
+    """Build a single scene MP4: STATIC still image (no zoom, no Ken Burns) + narration audio.
 
-    # zoompan: starts at zoom=1.0, increments by KEN_BURNS_ZOOM_STEP per frame,
-    # caps at KEN_BURNS_ZOOM. Output stays 1280x720.
-    zoom_filter = (
+    The zoom/pan was making viewers dizzy and looked amateurish. Static frames
+    with crossfade transitions look more professional and match the
+    "presentation / quote card" aesthetic.
+    """
+    # Static image — just scale to fit + crop to 1280x720, no zoompan filter.
+    static_filter = (
         f"scale={config.IMAGE_WIDTH}:{config.IMAGE_HEIGHT}:force_original_aspect_ratio=increase,"
         f"crop={config.IMAGE_WIDTH}:{config.IMAGE_HEIGHT},"
-        f"zoompan=z='min(zoom+{config.KEN_BURNS_ZOOM_STEP},{config.KEN_BURNS_ZOOM})':"
-        f"d={frames}:s={config.IMAGE_WIDTH}x{config.IMAGE_HEIGHT}:fps={fps},"
         f"format=yuv420p"
     )
 
@@ -48,7 +48,7 @@ def build_scene_clip(image_path: str, audio_path: str, duration: float, out_path
         [
             "-loop", "1", "-i", image_path,
             "-i", audio_path,
-            "-filter_complex", f"[0:v]{zoom_filter}[v]",
+            "-filter_complex", f"[0:v]{static_filter}[v]",
             "-map", "[v]", "-map", "1:a",
             "-c:v", "libx264", "-preset", "fast", "-tune", "stillimage",
             "-crf", "23",
@@ -63,16 +63,59 @@ def build_scene_clip(image_path: str, audio_path: str, duration: float, out_path
 
 
 def concat_clips(clip_paths: list[str], out_path: str):
-    """Concat scene clips with the concat demuxer (no re-encode, fast)."""
-    list_file = out_path + ".txt"
-    with open(list_file, "w") as f:
-        for p in clip_paths:
-            f.write(f"file '{os.path.abspath(p)}'\n")
-    _run_ffmpeg(
-        ["-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out_path],
-        desc=f"concat {len(clip_paths)} clips"
-    )
-    os.remove(list_file)
+    """Concat scene clips with a 0.5s crossfade between each (smoother than hard cuts)."""
+    if len(clip_paths) == 1:
+        # Single clip — just copy
+        _run_ffmpeg(["-i", clip_paths[0], "-c", "copy", out_path], desc="single clip")
+        return
+
+    # Build xfade chain: each transition is 0.5s, offset = sum of previous durations - 0.5s
+    # First, probe durations
+    durations = []
+    for p in clip_paths:
+        d = get_audio_duration(p)  # works for video files too (returns format duration)
+        durations.append(d)
+
+    # Build the filter_complex string
+    # [0:v][1:v]xfade=transition=fade:duration=0.5:offset=D0-0.5[v01];
+    # [v01][2:v]xfade=transition=fade:duration=0.5:offset=D0+D1-1.0[v012]; ...
+    # Also do the same for audio.
+    filter_parts = []
+    prev_v = "[0:v]"
+    prev_a = "[0:a]"
+    cumulative = 0.0
+    xf_duration = 0.5
+
+    for i in range(1, len(clip_paths)):
+        cumulative += durations[i - 1]
+        offset = max(0, cumulative - xf_duration)
+        out_v = f"[v{i}]"
+        out_a = f"[a{i}]"
+        filter_parts.append(
+            f"{prev_v}[{i}:v]xfade=transition=fade:duration={xf_duration}:offset={offset}{out_v}"
+        )
+        filter_parts.append(
+            f"{prev_a}[{i}:a]acrossfade=d={xf_duration}{out_a}"
+        )
+        prev_v = out_v
+        prev_a = out_a
+
+    filter_complex = ";".join(filter_parts)
+
+    args = ["-y"]
+    for p in clip_paths:
+        args.extend(["-i", p])
+    args.extend([
+        "-filter_complex", filter_complex,
+        "-map", prev_v,
+        "-map", prev_a,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        out_path,
+    ])
+
+    _run_ffmpeg(args, desc=f"concat {len(clip_paths)} clips with crossfade")
 
 
 def add_music_and_subtitles(
