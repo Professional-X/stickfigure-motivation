@@ -225,6 +225,20 @@ def _upload_via_composio(video_path, title, description, tags) -> str:
 
     data = r.json()
     print(f"[upload] Composio response: {json.dumps(data, indent=2)[:500]}")
+
+    # CRITICAL: Composio returns HTTP 200 even when the underlying YouTube call
+    # failed (e.g. 429 quota exceeded). The error is nested inside data.data.
+    # Check for http_error / error fields before extracting the video ID.
+    inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+    if isinstance(inner, dict):
+        # Look for any error indicators
+        http_err = inner.get("http_error") or inner.get("error")
+        err_msg = inner.get("message") or inner.get("error_message")
+        if http_err or (err_msg and "error" in str(err_msg).lower()[:50]):
+            raise RuntimeError(
+                f"YouTube API call failed: {http_err or err_msg}"
+            )
+
     video_id = _extract_video_id(data)
     if not video_id:
         # Try nested structures
