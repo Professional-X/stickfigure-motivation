@@ -1,0 +1,57 @@
+name: Retry YouTube Upload
+
+# Runs every hour, picks up unpublished videos from previous runs, and tries
+# to upload them. Fast exit if quota still exceeded — next hour's run will
+# try again. YouTube daily quota resets at midnight Pacific time.
+#
+# Each run is capped at 5 minutes — never burns hours of Actions minutes.
+
+on:
+  schedule:
+    # Every hour at minute 15 (offset to avoid the top-of-hour GH Actions load)
+    - cron: "15 * * * *"
+  workflow_dispatch: {}  # manual trigger from Actions tab
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5  # short — never wait on quota resets
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Find and retry unpublished videos
+        env:
+          # YouTube direct upload (preferred, if OAuth configured)
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          # Composio fallback
+          COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
+          COMPOSIO_ENTITY_ID: ${{ secrets.COMPOSIO_ENTITY_ID }}
+          VIDEO_OUTPUT_DIR: ./output
+        run: python retry_upload.py
+
+      - name: Commit any new uploaded.txt markers
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/*/uploaded.txt output/*/upload_attempts.txt output/*/UPLOAD_FAILED_PERMANENT.txt 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update upload status markers [skip ci]"
+            git push
+          else
+            echo "No status changes to commit."
+          fi
