@@ -10,6 +10,8 @@ jobs:
   generate:
     runs-on: ubuntu-latest
     timeout-minutes: 30  # SVG render is instant; main cost is whisper + ffmpeg
+    permissions:
+      contents: write   # needed for gh release create + git push
 
     steps:
       - uses: actions/checkout@v4
