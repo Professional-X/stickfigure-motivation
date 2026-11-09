@@ -36,6 +36,8 @@ jobs:
 
       - name: Find and retry unpublished videos
         env:
+          # GitHub CLI auth (needed to download final.mp4 from releases)
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # YouTube direct upload (preferred, if OAuth configured)
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
