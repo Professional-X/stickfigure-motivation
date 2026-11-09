@@ -50,7 +50,13 @@ def run():
         # Render the pose — uses the "pose" field (falls back to image_prompt
         # for backwards compat). Deterministic, no API calls.
         pose_name = scene.get("pose") or scene.get("image_prompt") or "standing_tall"
-        generate_image(pose_name, img_path)
+        # Use first sentence of narration as caption (truncated internally)
+        caption = scene.get("narration", "")
+        generate_image(
+            pose_name, img_path,
+            caption=caption,
+            scene_num=i + 1, scene_total=len(scenes),
+        )
         scene["image_path"] = img_path
         scene["pose_used"] = pose_name if pose_name in __import__("svg_poses").POSE_REGISTRY else "standing_tall"
 
