@@ -16,6 +16,9 @@ jobs:
   retry:
     runs-on: ubuntu-latest
     timeout-minutes: 5  # short — never wait on quota resets
+    permissions:
+      contents: write   # needed for git push (uploaded.txt markers)
+      actions: read     # needed to read releases from other runs
 
     steps:
       - uses: actions/checkout@v4
