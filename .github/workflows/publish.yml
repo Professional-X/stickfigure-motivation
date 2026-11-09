@@ -59,3 +59,42 @@ jobs:
           path: output/
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Upload final.mp4 to GitHub Release (permanent storage for retry workflow)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find the latest run dir
+          RUN_DIR=$(ls -td output/*/ | head -1)
+          if [ -z "$RUN_DIR" ] || [ ! -f "$RUN_DIR/final.mp4" ]; then
+            echo "No final.mp4 found, skipping release upload"
+            exit 0
+          fi
+          RUN_ID="${{ github.run_id }}"
+          # Create a release with tag = run_id
+          gh release create "video-${RUN_ID}" "$RUN_DIR/final.mp4" \
+            --title "Video ${RUN_ID}" \
+            --notes "Auto-generated video. Final.mp4 retained for retry_upload workflow." \
+            --prerelease || \
+          gh release upload "video-${RUN_ID}" "$RUN_DIR/final.mp4" --clobber
+
+          # Get the download URL and write to metadata.json
+          DOWNLOAD_URL=$(gh release view "video-${RUN_ID}" --json assets --jq '.assets[0].url')
+          echo "{\"video_release_url\": \"${DOWNLOAD_URL}\", \"run_id\": \"${RUN_ID}\"}" > "$RUN_DIR/release_info.json"
+          echo "Release URL: ${DOWNLOAD_URL}"
+
+      - name: Commit metadata + release info for retry workflow
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Only commit lightweight files (not the mp4) — retry workflow
+          # downloads mp4 from the GitHub Release on demand.
+          git add output/*/metadata.json output/*/MANUAL_UPLOAD_NEEDED.txt output/*/release_info.json 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: video metadata for retry upload [skip ci]"
+            git push
+          else
+            echo "No metadata changes to commit."
+          fi
