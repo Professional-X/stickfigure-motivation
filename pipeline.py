@@ -42,6 +42,8 @@ def run():
 
     # 4. Per-scene: image + TTS
     # SVG pose rendering is instant — no rate limit delay needed.
+    import svg_poses
+    bg_terms = svg_poses.BG_SEARCH_TERMS
     for i, scene in enumerate(scenes):
         print(f"\n--- scene {i + 1}/{len(scenes)} ---")
         img_path = os.path.join(work, f"img_{i:03d}.png")
@@ -52,13 +54,17 @@ def run():
         pose_name = scene.get("pose") or scene.get("image_prompt") or "standing_tall"
         # Use first sentence of narration as caption (truncated internally)
         caption = scene.get("narration", "")
+        # Rotate through background search terms for visual variety
+        bg_term = bg_terms[i % len(bg_terms)]
         generate_image(
             pose_name, img_path,
             caption=caption,
             scene_num=i + 1, scene_total=len(scenes),
+            bg_search_term=bg_term,
         )
         scene["image_path"] = img_path
-        scene["pose_used"] = pose_name if pose_name in __import__("svg_poses").POSE_REGISTRY else "standing_tall"
+        scene["pose_used"] = pose_name if pose_name in svg_poses.POSE_REGISTRY else "standing_tall"
+        scene["bg_search_term"] = bg_term
 
         # TTS
         synth_scene(scene["narration"], audio_path)
