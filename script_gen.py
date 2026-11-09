@@ -56,8 +56,10 @@ SCENE_PROMPT = """You are breaking a motivation script into visual scenes for a 
 
 Each scene shows ONE stick-figure pose from a fixed library while the narration plays. The same character appears in every frame — only the pose changes.
 
+CRITICAL: Each scene's narration must be 60-100 words long (about 25-35 seconds when read aloud). Do NOT split the script into tiny 1-2 sentence chunks. Group consecutive sentences into substantial narration blocks of 60-100 words each.
+
 Given the script below, break it into {n} sequential scenes. For each scene, output:
-- narration: the exact words spoken during that scene (verbatim from the script, in order — every word of the script must appear across all scenes with nothing added or removed)
+- narration: a 60-100 word chunk of the script (verbatim from the script, in order — every word of the script must appear across all scenes with nothing added or removed)
 - pose: ONE pose name from the list below. Choose the pose that best matches the emotional beat of the narration. Vary poses across scenes (don't repeat the same pose twice in a row unless intentional).
 
 Available poses (use these EXACT names, nothing else):
