@@ -51,7 +51,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add output/*/uploaded.txt output/*/upload_attempts.txt output/*/UPLOAD_FAILED_PERMANENT.txt 2>/dev/null || true
+          git add -f output/*/uploaded.txt output/*/upload_attempts.txt output/*/UPLOAD_FAILED_PERMANENT.txt 2>/dev/null || true
           if ! git diff --cached --quiet; then
             git commit -m "chore: update upload status markers [skip ci]"
             git push
