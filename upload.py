@@ -22,36 +22,112 @@ def upload_to_youtube(
     title: str,
     description: str,
     tags: list[str],
+    thumbnail_path: str | None = None,
 ) -> str:
-    """Upload and return the YouTube video ID (or empty string on skip)."""
+    """Upload and return the YouTube video ID (or empty string on skip).
+
+    If thumbnail_path is given and upload succeeds, the custom thumbnail is
+    set on the video via the YouTube Data API thumbnails.set endpoint
+    (direct API only — Composio does not expose thumbnail upload).
+    """
     if not os.path.exists(video_path):
         raise RuntimeError(f"video file not found: {video_path}")
+
+    video_id = ""
 
     # Path 1: Direct YouTube Data API (recommended)
     if os.environ.get("YOUTUBE_REFRESH_TOKEN") and os.environ.get("YOUTUBE_CLIENT_ID"):
         try:
-            return _upload_via_youtube_data_api(video_path, title, description, tags)
+            video_id = _upload_via_youtube_data_api(video_path, title, description, tags)
         except Exception as e:
             print(f"[upload] YouTube Data API failed: {type(e).__name__}: {e}")
             print("[upload] falling through to Composio...")
 
     # Path 2: Composio (flaky)
-    if config.COMPOSIO_API_KEY and config.COMPOSIO_ENTITY_ID:
+    if not video_id and config.COMPOSIO_API_KEY and config.COMPOSIO_ENTITY_ID:
         try:
-            return _upload_via_composio(video_path, title, description, tags)
+            video_id = _upload_via_composio(video_path, title, description, tags)
         except Exception as e:
             print(f"[upload] Composio failed: {type(e).__name__}: {e}")
             print("[upload] falling through to manual upload...")
 
     # Path 3: Skip
-    print("\n[upload] === AUTOMATIC UPLOAD SKIPPED ===")
-    print(f"[upload] video saved locally at: {video_path}")
-    print(f"[upload] file size: {os.path.getsize(video_path) / 1024 / 1024:.1f} MB")
-    print(f"[upload] The GitHub Actions run also uploads it as an artifact.")
-    print(f"[upload] Download from: https://github.com/Professional-X/stickfigure-motivation/actions")
-    print(f"[upload] Then upload manually at: https://www.youtube.com/upload")
-    print(f"[upload] Title to use: {title[:80]}")
-    return ""
+    if not video_id:
+        print("\n[upload] === AUTOMATIC UPLOAD SKIPPED ===")
+        print(f"[upload] video saved locally at: {video_path}")
+        print(f"[upload] file size: {os.path.getsize(video_path) / 1024 / 1024:.1f} MB")
+        print(f"[upload] The GitHub Actions run also uploads it as an artifact.")
+        print(f"[upload] Download from: https://github.com/Professional-X/stickfigure-motivation/actions")
+        print(f"[upload] Then upload manually at: https://www.youtube.com/upload")
+        print(f"[upload] Title to use: {title[:80]}")
+        return ""
+
+    # Upload succeeded — now set the custom thumbnail (direct API only)
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        _set_thumbnail(video_id, thumbnail_path)
+
+    return video_id
+
+
+def _set_thumbnail(video_id: str, thumbnail_path: str) -> bool:
+    """Set a custom thumbnail on an uploaded video via YouTube Data API.
+
+    Requires the same OAuth refresh token as the upload. Custom thumbnails
+    need the YouTube account verified (https://www.youtube.com/verify) — if
+    the account isn't verified, this returns 400 and we warn but don't fail
+    the whole upload (the video is already up).
+    """
+    if not os.environ.get("YOUTUBE_REFRESH_TOKEN"):
+        print("[upload] thumbnail: skipped (no YouTube OAuth refresh token)")
+        return False
+    if not os.path.exists(thumbnail_path):
+        print(f"[upload] thumbnail: file not found ({thumbnail_path})")
+        return False
+
+    print(f"[upload] setting custom thumbnail: {os.path.basename(thumbnail_path)}")
+    try:
+        client_id = os.environ["YOUTUBE_CLIENT_ID"]
+        client_secret = os.environ["YOUTUBE_CLIENT_SECRET"]
+        refresh_token = os.environ["YOUTUBE_REFRESH_TOKEN"]
+
+        # refresh access token
+        r = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        access_token = r.json()["access_token"]
+
+        # POST the image to the thumbnails.set endpoint
+        with open(thumbnail_path, "rb") as f:
+            img_bytes = f.read()
+        r = requests.post(
+            f"https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId={video_id}",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "image/png",
+            },
+            data=img_bytes,
+            timeout=120,
+        )
+        if r.status_code in (200, 201):
+            print(f"[upload] thumbnail set successfully on video {video_id}")
+            return True
+        # Common failure: account not verified for custom thumbnails
+        print(f"[upload] thumbnail set failed: HTTP {r.status_code} {r.text[:300]}")
+        if r.status_code == 400 and "verify" in r.text.lower():
+            print("[upload] NOTE: custom thumbnails require a verified YouTube account.")
+            print("[upload]       Verify at https://www.youtube.com/verify (takes ~24h).")
+        return False
+    except Exception as e:
+        print(f"[upload] thumbnail set exception: {type(e).__name__}: {e}")
+        return False
 
 
 def _upload_via_youtube_data_api(video_path, title, description, tags) -> str:
