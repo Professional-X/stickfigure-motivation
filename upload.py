@@ -326,17 +326,49 @@ def _upload_via_composio(video_path, title, description, tags) -> str:
 
 
 def _extract_video_id(result) -> str:
+    """Extract a YouTube video ID from a Composio response.
+
+    Composio nests the YouTube response in various shapes depending on version:
+      {"data": {"id": "abc123"}}
+      {"data": {"video": {"id": "abc123"}}}
+      {"data": {"successful": [...], "data": {"id": "abc123"}}}
+    Recursively search all nested dicts for the first key matching
+    id/video_id/videoId/youtube_video_id whose value looks like a YouTube ID
+    (11-char string). Falls back to str(result) if nothing found.
+    """
+    def _looks_like_yt_id(val) -> bool:
+        return isinstance(val, str) and len(val) == 11 and val.isalnum()
+
+    def _search(obj):
+        if isinstance(obj, str):
+            if _looks_like_yt_id(obj):
+                return obj
+            return None
+        if isinstance(obj, dict):
+            # check direct keys first (prefer id over video_id)
+            for key in ("id", "video_id", "videoId", "youtube_video_id"):
+                if key in obj and _looks_like_yt_id(obj[key]):
+                    return obj[key]
+            # then recurse into nested dicts/lists
+            for v in obj.values():
+                found = _search(v)
+                if found:
+                    return found
+        elif isinstance(obj, list):
+            for item in obj:
+                found = _search(item)
+                if found:
+                    return found
+        return None
+
+    found = _search(result)
+    if found:
+        return found
+    # last resort: if result is a plain string, return it as-is
     if isinstance(result, str):
         return result
-    if isinstance(result, dict):
-        for key in ("id", "video_id", "videoId", "youtube_video_id"):
-            if key in result:
-                return str(result[key])
-        if "data" in result and isinstance(result["data"], dict):
-            for key in ("id", "video_id", "videoId"):
-                if key in result["data"]:
-                    return str(result["data"][key])
-    return str(result)
+    print(f"[upload] WARNING: couldn't extract video ID from response shape: {str(result)[:200]}")
+    return ""
 
 
 if __name__ == "__main__":
