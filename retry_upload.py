@@ -101,6 +101,7 @@ def find_unpublished_videos() -> list[dict]:
             "run_id": entry,
             "run_dir": run_dir,
             "video_path": os.path.join(run_dir, "final.mp4"),
+            "thumbnail_path": os.path.join(run_dir, "thumbnail.png"),
             "title": metadata.get("title", "Untitled"),
             "description": metadata.get("description", ""),
             "tags": metadata.get("tags", config.YOUTUBE_TAGS),
@@ -167,12 +168,21 @@ def main():
 
         print(f"[retry] video: {video_path} ({os.path.getsize(video_path) // 1024 // 1024} MB)")
 
+        # Custom thumbnail (committed to repo by publish.yml — small, ~40 KB)
+        thumb_path = video["thumbnail_path"]
+        if os.path.exists(thumb_path):
+            print(f"[retry] thumbnail: {thumb_path} ({os.path.getsize(thumb_path) // 1024} KB)")
+        else:
+            thumb_path = None
+            print(f"[retry] no thumbnail found — will upload without custom thumbnail")
+
         try:
             video_id = upload_to_youtube(
                 video_path=video_path,
                 title=video["title"],
                 description=video["description"],
                 tags=video["tags"],
+                thumbnail_path=thumb_path,
             )
             if video_id:
                 with open(os.path.join(video["run_dir"], "uploaded.txt"), "w") as f:
