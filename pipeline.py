@@ -14,6 +14,7 @@ import config
 from themes import pick_theme
 from script_gen import generate_video_plan
 from image_gen import generate_image
+from thumbnail import render_thumbnail
 from tts import synth_scene, get_audio_duration, concat_audio
 from subtitles import transcribe, to_ass
 from compose import compose_video
@@ -39,6 +40,22 @@ def run():
 
     scenes = plan["scenes"]
     print(f"\n[pipeline] {len(scenes)} scenes generated\n")
+
+    # 3b. Generate the viral thumbnail (split-screen BEFORE/AFTER + bold text)
+    # Channel handle comes from CHANNEL_HANDLE repo Variable (not sensitive).
+    channel_handle = os.environ.get("CHANNEL_HANDLE", "")
+    thumbnail_text = plan.get("thumbnail_text", "WAKE UP")
+    thumbnail_path = os.path.join(work, "thumbnail.png")
+    print(f"\n[pipeline] generating thumbnail (text: '{thumbnail_text}', handle: '{channel_handle or 'none'}')")
+    try:
+        render_thumbnail(
+            thumbnail_text=thumbnail_text,
+            out_path=thumbnail_path,
+            channel_handle=channel_handle,
+        )
+    except Exception as e:
+        print(f"[pipeline] WARNING: thumbnail generation failed: {e}")
+        thumbnail_path = ""
 
     # 4. Per-scene: image + TTS
     # SVG pose rendering is instant — no rate limit delay needed.
@@ -104,7 +121,7 @@ def run():
     print(f"\n[pipeline] composing video (this takes a while)...")
     compose_video(scenes, music_path, sub_path, out_path)
 
-    # 9. Save metadata
+    # 9. Save metadata (includes viral packaging fields for retry workflow)
     metadata = {
         "run_id": run_id,
         "title": plan.get("title"),
@@ -115,11 +132,16 @@ def run():
         "duration_sec": total_duration,
         "scene_count": len(scenes),
         "video_path": out_path,
+        "thumbnail_text": plan.get("thumbnail_text", ""),
+        "hook_line": plan.get("hook_line", ""),
+        "recurring_phrase": plan.get("recurring_phrase", ""),
+        "thumbnail_path": thumbnail_path,
+        "channel_handle": channel_handle,
     }
     with open(os.path.join(work, "metadata.json"), "w") as f:
         json.dump(metadata, f, indent=2)
 
-    # 10. Upload
+    # 10. Upload (with custom thumbnail)
     print(f"\n[pipeline] uploading to YouTube...")
     try:
         video_id = upload_to_youtube(
@@ -127,6 +149,7 @@ def run():
             title=plan["title"],
             description=plan["description"],
             tags=plan.get("tags", config.YOUTUBE_TAGS),
+            thumbnail_path=thumbnail_path if thumbnail_path else None,
         )
         if video_id:
             print(f"\n[pipeline] === uploaded: https://youtube.com/watch?v={video_id} ===")
