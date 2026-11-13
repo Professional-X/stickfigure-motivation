@@ -94,7 +94,7 @@ jobs:
           echo "{\"video_release_url\": \"${DOWNLOAD_URL}\", \"run_id\": \"${RUN_ID}\"}" > "$RUN_DIR/release_info.json"
           echo "Release URL: ${DOWNLOAD_URL}"
 
-      - name: Commit metadata + thumbnail + release info for retry workflow
+      - name: Commit metadata + thumbnail + uploaded markers for retry workflow
         if: always()
         run: |
           git config user.name "github-actions[bot]"
@@ -103,9 +103,11 @@ jobs:
           # these specific files tracked so retry_upload can find them).
           # thumbnail.png is ~40 KB — small enough to commit (mp4 is NOT committed,
           # it's downloaded from the release on demand).
-          git add -f output/*/metadata.json output/*/thumbnail.png output/*/MANUAL_UPLOAD_NEEDED.txt output/*/release_info.json 2>/dev/null || true
+          # uploaded.txt MUST be committed when upload succeeds, otherwise the
+          # retry workflow will re-upload the same video (creating duplicates).
+          git add -f output/*/metadata.json output/*/thumbnail.png output/*/uploaded.txt output/*/MANUAL_UPLOAD_NEEDED.txt output/*/release_info.json 2>/dev/null || true
           if ! git diff --cached --quiet; then
-            git commit -m "chore: video metadata + thumbnail for retry upload [skip ci]"
+            git commit -m "chore: video metadata + thumbnail + upload markers [skip ci]"
             git push
           else
             echo "No metadata changes to commit."
