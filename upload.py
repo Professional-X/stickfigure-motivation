@@ -332,25 +332,56 @@ def _extract_video_id(result) -> str:
       {"data": {"id": "abc123"}}
       {"data": {"video": {"id": "abc123"}}}
       {"data": {"successful": [...], "data": {"id": "abc123"}}}
-    Recursively search all nested dicts for the first key matching
-    id/video_id/videoId/youtube_video_id whose value looks like a YouTube ID
-    (11-char string). Falls back to str(result) if nothing found.
+
+    Strategy (in priority order):
+      1. Try canonical paths explicitly (data.video.id, data.id, ...) — these are
+         the known shapes and avoid matching a stray tag/description word.
+      2. Recursively search all nested dicts, but SKIP known text-content fields
+         (tags, title, description, channelTitle, ...) so an 11-letter word like
+         "masculinity" (a tag) is never mistaken for a video ID.
+      3. A value must pass _looks_like_yt_id: 11 chars, base64url charset, AND
+         contain a digit/underscore/hyphen or mixed case — this rejects
+         pure-lowercase English words that happen to be exactly 11 letters
+         (e.g. "masculinity", "discipline", "competition").
     """
+    # Fields whose string values must never be scanned for a video ID.
+    _TEXT_FIELDS = frozenset({
+        "tags", "title", "description", "channelTitle", "channelId",
+        "categoryId", "name", "label", "text", "body", "etag", "kind",
+        "videoPath", "thumbnail_text", "hook_line", "recurring_phrase",
+        "theme", "category", "status", "status_reason", "word_id", "alias",
+        "auth_scheme", "authScheme", "toolkit", "scope", "token_type",
+        "callback_url", "finalRedirectUri", "filename", "mimetype",
+        "slug", "request_id", "suggested_fix", "message", "error",
+    })
+
     def _looks_like_yt_id(val) -> bool:
-        return isinstance(val, str) and len(val) == 11 and val.isalnum()
+        # YouTube IDs are 11-char base64url strings (A-Z a-z 0-9 - _).
+        if not (isinstance(val, str) and len(val) == 11):
+            return False
+        core = val.replace("-", "").replace("_", "")
+        if not core.isalnum():
+            return False
+        # Reject pure-alphabetic 11-letter strings with no case mixing — these
+        # are almost always English words (e.g. "masculinity"). Real YouTube IDs
+        # virtually always contain a digit/underscore/hyphen or mix upper+lower.
+        has_digit_or_special = any(c in "0123456789-_" for c in val)
+        has_upper = any(c.isupper() for c in val)
+        has_lower = any(c.islower() for c in val)
+        return has_digit_or_special or (has_upper and has_lower)
 
     def _search(obj):
         if isinstance(obj, str):
-            if _looks_like_yt_id(obj):
-                return obj
-            return None
+            return obj if _looks_like_yt_id(obj) else None
         if isinstance(obj, dict):
-            # check direct keys first (prefer id over video_id)
+            # check direct id-like keys first (prefer id over video_id)
             for key in ("id", "video_id", "videoId", "youtube_video_id"):
                 if key in obj and _looks_like_yt_id(obj[key]):
                     return obj[key]
-            # then recurse into nested dicts/lists
-            for v in obj.values():
+            # then recurse into nested values, skipping text-content fields
+            for k, v in obj.items():
+                if k in _TEXT_FIELDS:
+                    continue
                 found = _search(v)
                 if found:
                     return found
@@ -361,10 +392,27 @@ def _extract_video_id(result) -> str:
                     return found
         return None
 
+    # 1. Try canonical paths first (the actual shapes Composio returns).
+    for path in (("data", "video", "id"), ("data", "id"),
+                 ("data", "data", "id"), ("video", "id"),
+                 ("data", "successful", "id")):
+        cur = result
+        ok = True
+        for k in path:
+            if isinstance(cur, dict) and k in cur:
+                cur = cur[k]
+            else:
+                ok = False
+                break
+        if ok and _looks_like_yt_id(cur):
+            return cur
+
+    # 2. Recursive fallback (skips text fields, strict ID check).
     found = _search(result)
     if found:
         return found
-    # last resort: if result is a plain string, return it as-is
+
+    # 3. last resort: if result is a plain string, return it as-is.
     if isinstance(result, str):
         return result
     print(f"[upload] WARNING: couldn't extract video ID from response shape: {str(result)[:200]}")
