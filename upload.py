@@ -98,6 +98,41 @@ def upload_to_youtube(
     return video_id
 
 
+def _set_thumbnail_via_composio(video_id: str, thumbnail_url: str) -> tuple[bool, str]:
+    """Set a custom thumbnail via Composio's YOUTUBE_UPDATE_THUMBNAIL action.
+
+    Uses the SAME authorized YouTube connection that uploaded the video — no
+    separate OAuth setup needed. `thumbnail_url` must be publicly fetchable
+    (JPG/GIF/PNG, <2MB); typically the raw.githubusercontent.com URL of the
+    thumbnail.png the workflow commits to the repo.
+
+    Returns (ok, message). Most common failure: channel not phone-verified
+    (YouTube returns 403 -> verify at https://www.youtube.com/verify).
+    """
+    if not (config.COMPOSIO_API_KEY and config.COMPOSIO_ENTITY_ID):
+        return False, "Composio creds not configured"
+    print(f"[upload] setting thumbnail via Composio YOUTUBE_UPDATE_THUMBNAIL...")
+    try:
+        r = requests.post(
+            "https://backend.composio.dev/api/v3.1/tools/execute/YOUTUBE_UPDATE_THUMBNAIL",
+            headers={"x-api-key": config.COMPOSIO_API_KEY, "Content-Type": "application/json"},
+            json={"entity_id": config.COMPOSIO_ENTITY_ID,
+                  "arguments": {"videoId": video_id, "thumbnailUrl": thumbnail_url}},
+            timeout=120,
+        )
+        if r.status_code not in (200, 201):
+            return False, f"Composio HTTP {r.status_code}: {r.text[:300]}"
+        data = r.json()
+        if data.get("successful") is False:
+            inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+            msg = inner.get("message") or data.get("error") or "unknown error"
+            return False, msg
+        print(f"[upload] thumbnail set successfully on video {video_id} (via Composio)")
+        return True, "ok"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
 def _set_thumbnail(video_id: str, thumbnail_path: str) -> bool:
     """Set a custom thumbnail on an uploaded video via YouTube Data API.
 
