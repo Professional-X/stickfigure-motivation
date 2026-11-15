@@ -1,16 +1,16 @@
-name: Publish Stick Figure Motivation
+name: Publish StickVerse Premium
 
 on:
   schedule:
     # Wed + Sat at 17:00 UTC (twice a week — quality over quantity)
     # 17:00 UTC = 9am Pacific / 12pm Eastern / 5pm London
     - cron: "0 17 * * 3,6"
-  workflow_dispatch: {}  # manual trigger from Actions tab
+  workflow_dispatch: {}  # manual trigger from Actions tab (one-click publish)
 
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # SVG render is instant; main cost is whisper + ffmpeg
+    timeout-minutes: 30  # Mixkit download + 6-scene cinematic compose (~10-15 min)
     permissions:
       contents: write   # needed for gh release create + git push
 
@@ -33,7 +33,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Generate and publish video
+      - name: Cache whisper model + Incompetech music
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ./music
+          key: premium-cache-${{ runner.os }}-v1
+
+      - name: Generate and publish premium video
         env:
           # === LLM (OpenRouter, free Nemotron Ultra 550B) ===
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -54,7 +62,7 @@ jobs:
           # Channel handle shown on thumbnails (set as repo Variable, not Secret)
           CHANNEL_HANDLE: ${{ vars.CHANNEL_HANDLE }}
           VIDEO_OUTPUT_DIR: ./output
-        run: python pipeline.py
+        run: python pipeline_premium.py
 
       - name: Upload output as artifact (debug)
         if: always()
@@ -65,47 +73,19 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      - name: Upload final.mp4 + thumbnail.png to GitHub Release (permanent storage for retry workflow)
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Find the latest run dir
-          RUN_DIR=$(ls -td output/*/ | head -1)
-          if [ -z "$RUN_DIR" ] || [ ! -f "$RUN_DIR/final.mp4" ]; then
-            echo "No final.mp4 found, skipping release upload"
-            exit 0
-          fi
-          RUN_ID="${{ github.run_id }}"
-          # Upload final.mp4 + thumbnail.png (if it exists) to the release
-          ASSETS="$RUN_DIR/final.mp4"
-          if [ -f "$RUN_DIR/thumbnail.png" ]; then
-            ASSETS="$ASSETS $RUN_DIR/thumbnail.png"
-          fi
-          # Create a release with tag = run_id
-          gh release create "video-${RUN_ID}" $ASSETS \
-            --title "Video ${RUN_ID}" \
-            --notes "Auto-generated video. final.mp4 + thumbnail.png retained for retry_upload workflow." \
-            --prerelease || \
-          gh release upload "video-${RUN_ID}" $ASSETS --clobber
-
-          # Get the download URL and write to metadata.json
-          DOWNLOAD_URL=$(gh release view "video-${RUN_ID}" --json assets --jq '.assets[0].url')
-          echo "{\"video_release_url\": \"${DOWNLOAD_URL}\", \"run_id\": \"${RUN_ID}\"}" > "$RUN_DIR/release_info.json"
-          echo "Release URL: ${DOWNLOAD_URL}"
-
-      - name: Commit metadata + thumbnail + uploaded markers for retry workflow
+      - name: Commit metadata + thumbnail + uploaded markers (for topic queue)
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Force-add lightweight files (output/ is gitignored, but we want
-          # these specific files tracked so retry_upload can find them).
-          # thumbnail.png is ~40 KB — small enough to commit (mp4 is NOT committed,
-          # it's downloaded from the release on demand).
-          # uploaded.txt MUST be committed when upload succeeds, otherwise the
-          # retry workflow will re-upload the same video (creating duplicates).
-          git add -f output/*/metadata.json output/*/thumbnail.png output/*/uploaded.txt output/*/MANUAL_UPLOAD_NEEDED.txt output/*/release_info.json 2>/dev/null || true
+          # Force-add lightweight files (output/ is gitignored, but the topic
+          # queue in premium/queue.py reads these to know which topics are
+          # already published, so we track just these small files).
+          # thumbnail.png is ~1 MB — fine to commit. final.mp4 is NOT committed
+          # (too large); it lives in the run artifact for 7 days.
+          # uploaded.txt MUST be committed on success so the next run skips this
+          # topic and publishes the next one.
+          git add -f output/*/metadata.json output/*/thumbnail.png output/*/uploaded.txt output/*/MANUAL_UPLOAD_NEEDED.txt 2>/dev/null || true
           if ! git diff --cached --quiet; then
             git commit -m "chore: video metadata + thumbnail + upload markers [skip ci]"
             git push
