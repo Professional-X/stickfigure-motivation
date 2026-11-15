@@ -101,6 +101,21 @@ jobs:
             echo "No metadata changes to commit."
           fi
 
+      - name: Set custom thumbnail on YouTube (via Composio)
+        if: always()
+        env:
+          # Same authorized YouTube connection used for upload — no OAuth needed.
+          COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
+          COMPOSIO_ENTITY_ID: ${{ secrets.COMPOSIO_ENTITY_ID }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          # thumbnail.png was just committed by the previous step, so its
+          # raw.githubusercontent.com URL is public. This step hands that URL
+          # to Composio's YOUTUBE_UPDATE_THUMBNAIL action, which sets it on the
+          # just-uploaded video. On failure (e.g. channel not phone-verified)
+          # it updates THUMBNAIL_MANUAL_NEEDED.txt with the exact reason.
+          python set_thumbnail_composio.py
+
       - name: Thumbnail status (action required if skipped)
         if: always()
         run: |
@@ -109,15 +124,11 @@ jobs:
           if [ -z "$latest" ]; then echo "no output dir"; exit 0; fi
           echo "run dir: $latest"
           if [ -f "${latest}THUMBNAIL_MANUAL_NEEDED.txt" ]; then
-            echo "!! CUSTOM THUMBNAIL WAS NOT SET ON YOUTUBE (no OAuth token) !!"
+            echo "!! CUSTOM THUMBNAIL WAS NOT SET ON YOUTUBE !!"
             echo "    -> video is using YouTube's auto-generated thumbnail."
             cat "${latest}THUMBNAIL_MANUAL_NEEDED.txt"
-            echo "    One-time fix: run get_youtube_oauth.py locally, add the 3"
-            echo "    YOUTUBE_* secrets to the repo, then re-run this workflow"
-            echo "    OR run scripts/backfill_thumbnails.py to set it on the"
-            echo "    already-uploaded video."
           elif [ -f "${latest}uploaded.txt" ]; then
-            echo "custom thumbnail set on YouTube (variant B)."
+            echo "custom thumbnail SET on YouTube (variant B, via Composio)."
           else
             echo "upload did not complete; no thumbnail action needed yet."
           fi
