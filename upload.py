@@ -62,9 +62,38 @@ def upload_to_youtube(
         print(f"[upload] Title to use: {title[:80]}")
         return ""
 
-    # Upload succeeded — now set the custom thumbnail (direct API only)
+    # Upload succeeded — now set the custom thumbnail (direct API only).
+    # If it can't be set (no OAuth token, or account not verified), write a
+    # marker file so the workflow's status step flags it for manual action
+    # AND so backfill_thumbnails.py can find + fix it later once OAuth exists.
+    thumb_ok = False
     if thumbnail_path and os.path.exists(thumbnail_path):
-        _set_thumbnail(video_id, thumbnail_path)
+        thumb_ok = _set_thumbnail(video_id, thumbnail_path)
+    if not thumb_ok and thumbnail_path:
+        work_dir = os.path.dirname(video_path)
+        marker = os.path.join(work_dir, "THUMBNAIL_MANUAL_NEEDED.txt")
+        studio_url = f"https://studio.youtube.com/video/{video_id}/editing"
+        primary_name = os.path.basename(thumbnail_path)
+        variants = []
+        thumb_subdir = os.path.join(work_dir, "thumbnails")
+        if os.path.isdir(thumb_subdir):
+            variants = sorted(f for f in os.listdir(thumb_subdir)
+                              if f.startswith("thumbnail_") and f.endswith(".png"))
+        with open(marker, "w") as f:
+            f.write(f"video_url: https://youtube.com/watch?v={video_id}\n")
+            f.write(f"studio_edit: {studio_url}\n")
+            f.write(f"primary_thumbnail (committed to repo): {primary_name}\n")
+            if variants:
+                f.write(f"all_variants (committed): {', '.join(variants)}\n")
+            f.write("\nHow to set the thumbnail:\n")
+            f.write("  Option A (manual, now): open the studio_edit URL above and upload\n")
+            f.write("    the primary_thumbnail PNG from this repo\n")
+            f.write("    (output/<run>/thumbnail.png or output/<run>/thumbnails/thumbnail_B.png).\n")
+            f.write("  Option B (automate future runs): run get_youtube_oauth.py locally,\n")
+            f.write("    add YOUTUBE_CLIENT_ID + YOUTUBE_CLIENT_SECRET + YOUTUBE_REFRESH_TOKEN\n")
+            f.write("    as repo secrets, then re-trigger. Run scripts/backfill_thumbnails.py\n")
+            f.write("    to set thumbnails on videos already uploaded.\n")
+        print(f"[upload] wrote THUMBNAIL_MANUAL_NEEDED.txt (custom thumbnail NOT set on {video_id})")
 
     return video_id
 
