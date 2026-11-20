@@ -24,7 +24,7 @@ import json
 import traceback
 
 import config
-from tts import synth_scene, get_audio_duration, concat_audio
+from tts import synth_scene_timed, get_audio_duration, concat_audio
 from upload import upload_to_youtube
 
 from premium import queue as Q
@@ -54,14 +54,16 @@ def run():
     scenes = topic["scenes"]
     print(f"[pipeline] {len(scenes)} scenes, ~{sum(len(s['narration'].split()) for s in scenes)} words\n")
 
-    # 2. Per-scene TTS
+    # 2. Per-scene TTS (human-cadence engine: per-sentence prosody + breathing
+    #    gaps; returns sentence timings used by compose for beat-synced cuts)
     for i, scene in enumerate(scenes):
         print(f"--- scene {i+1}/{len(scenes)} ---")
         audio_path = os.path.join(work, f"audio_{i:03d}.mp3")
-        synth_scene(scene["narration"], audio_path)
+        timings = synth_scene_timed(scene["narration"], audio_path)
         scene["audio_path"] = audio_path
         scene["duration"] = get_audio_duration(audio_path)
-        print(f"    duration: {scene['duration']:.1f}s")
+        scene["sentence_timings"] = timings
+        print(f"    duration: {scene['duration']:.1f}s ({len(timings)} sentences)")
 
     total_duration = sum(s["duration"] for s in scenes)
     print(f"\n[pipeline] total duration: {total_duration/60:.2f} min ({total_duration:.1f}s)")
