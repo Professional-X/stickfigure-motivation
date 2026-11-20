@@ -63,6 +63,158 @@ def render_scene(clip_path: str, duration: float, out_path: str, scene_idx: int)
     return out_path
 
 
+# ----- Stage 1b: rapid-cut montage (the "fast frames + effects" engine) -----
+# Instead of one slow 30s zoom per scene, each scene is broken into ~2-4s
+# segments cut on the narration's sentence boundaries, each rendered with a
+# rotating motion (zoom-in / pan-L / zoom-out / pan-R), stitched with quick
+# 0.12s xfades. This is the classic retention trick: the eye gets a fresh
+# composition every couple of seconds, so attention never settles long enough
+# to scroll. Motion is fast but not violent (we learned earlier that dizzying
+# zoompan hurts); the energy comes from CUTS + direction alternation.
+
+MOTIONS = ("in", "pan_lr", "out", "pan_rl")
+
+
+def _motion_expr(motion: str, n_frames: int) -> tuple[str, str, str]:
+    """Return (z, x, y) zoompan expressions for a motion type."""
+    Z = 0.10        # max zoom delta
+    PZ = 1.08       # fixed zoom factor for pan segments
+    nf = max(n_frames, 1)
+    cx, cy = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    if motion == "in":
+        return (f"1+{Z}*on/{nf}", cx, cy)
+    if motion == "out":
+        return (f"1+{Z}-{Z}*on/{nf}", cx, cy)
+    if motion == "pan_lr":
+        return (f"{PZ}", f"(iw-iw/zoom)*on/{nf}", cy)
+    if motion == "pan_rl":
+        return (f"{PZ}", f"(iw-iw/zoom)*(1-on/{nf})", cy)
+    return ("1.0", cx, cy)  # static
+
+
+def _segment_plan(duration: float, timings: list[dict],
+                  min_seg: float = 1.6, max_seg: float = 4.0) -> list[tuple[float, float]]:
+    """Turn sentence timings into (start, end) cut points, enforcing a 1.6-4.0s
+    segment window. Falls back to even ~3s splits when no timings are passed."""
+    if not timings:
+        n = max(1, int(round(duration / 3.0)))
+        edges = [duration * i / n for i in range(n + 1)]
+        return [(edges[i], edges[i + 1]) for i in range(n)]
+    cuts = [0.0] + [t["end"] for t in timings] + [duration]
+    merged = [0.0]
+    for c in cuts[1:]:
+        if c - merged[-1] >= min_seg or abs(c - duration) < 0.05:
+            merged.append(min(c, duration))
+    if merged[-1] < duration - 0.05:
+        merged.append(duration)
+    merged[-1] = duration
+    segs = []
+    for i in range(len(merged) - 1):
+        s, e = merged[i], merged[i + 1]
+        while e - s > max_seg:
+            segs.append((s, s + max_seg))
+            s += max_seg
+        if e - s > 0.1:
+            segs.append((s, e))
+    return segs or [(0.0, duration)]
+
+
+def _render_segment(clip_path: str, seg_dur: float, motion: str, seg_idx: int,
+                    scenes_dir: str, fade_in: bool = False) -> str:
+    """Render one short segment with its motion + cinematic grade + vignette."""
+    n_frames = max(int(seg_dur * S.FPS), 1)
+    W, H = S.VIDEO_W, S.VIDEO_H
+    sw, sh = int(W * 1.18), int(H * 1.18)   # headroom for pan + zoom
+    z, x, y = _motion_expr(motion, n_frames)
+    vf = (
+        f"scale={sw}:{sh}:force_original_aspect_ratio=increase,"
+        f"crop={sw}:{sh},"
+        f"zoompan=z='{z}':x='{x}':y='{y}':d=1:s={W}x{H}:fps={S.FPS},"
+        f"eq=contrast=1.10:saturation=1.14:brightness=-0.02,"
+        f"colorbalance=rs=-0.05:gs=0.0:bs=0.10:rm=0.02:gm=0.0:bm=-0.02:rh=0.06:gh=0.02:bh=-0.06,"
+        f"vignette,"
+        + ("fade=t=in:st=0:d=0.25," if fade_in else "")
+        + "setsar=1,format=yuv420p"
+    )
+    out = os.path.join(scenes_dir, f"seg_{seg_idx:03d}.mp4")
+    cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", clip_path,
+           "-t", f"{seg_dur:.3f}", "-an", "-vf", vf, "-r", str(S.FPS),
+           "-c:v", "libx264", "-preset", "fast", "-crf", "20", out]
+    _run(cmd, f"  seg {seg_idx} ({motion}, {seg_dur:.1f}s)")
+    return out
+
+
+def _xfade_concat_segs(seg_paths: list[str], seg_durs: list[float], out_path: str) -> str:
+    """Stitch segments with 0.12s fade xfades (quick energy cuts)."""
+    if len(seg_paths) == 1:
+        _run(["ffmpeg", "-y", "-i", seg_paths[0], "-c", "copy",
+              "-pix_fmt", "yuv420p", out_path], "  single-segment scene")
+        return out_path
+    xf = 0.12
+    parts, prev, cum = [], "[0:v]", 0.0
+    for i in range(1, len(seg_paths)):
+        cum += seg_durs[i - 1]
+        off = max(0.0, cum - xf)
+        nv = f"[v{i}]"
+        parts.append(f"{prev}[{i}:v]xfade=transition=fade:duration={xf}:offset={off:.3f}{nv}")
+        prev = nv
+    args = ["ffmpeg", "-y"]
+    for p in seg_paths:
+        args += ["-i", p]
+    args += ["-filter_complex", ";".join(parts), "-map", prev,
+             "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+             "-pix_fmt", "yuv420p", out_path]
+    _run(args, f"  xfade concat {len(seg_paths)} segments")
+    return out_path
+
+
+def render_scene_montage(clips: list[str], duration: float, timings: list[dict],
+                         out_path: str, scene_idx: int) -> str:
+    """Render one scene as a rapid-cut montage cycling through the scene's
+    Mixkit clips with rotating motion. Falls back to a solid-color source if
+    no clip is usable, and to the old single slow-zoom render is the caller's
+    job (compose_premium wraps this in a try/except)."""
+    scenes_dir = os.path.dirname(out_path)
+    valid_clips = [c for c in clips if _valid_video(c)]
+    if not valid_clips:
+        fallback = os.path.join(scenes_dir, f"fallback_{scene_idx}.mp4")
+        _run(["ffmpeg", "-y", "-f", "lavfi",
+              "-i", "color=c=0x0e0e12:s=1920x1080:r=30:d=2",
+              "-c:v", "libx264", "-preset", "fast", "-crf", "20", fallback],
+             f"  scene {scene_idx} color-fallback source")
+        valid_clips = [fallback]
+
+    segs = _segment_plan(duration, timings)
+    seg_paths, seg_durs = [], []
+    for k, (s, e) in enumerate(segs):
+        sd = max(e - s, 0.5)
+        clip = valid_clips[k % len(valid_clips)]
+        motion = MOTIONS[k % len(MOTIONS)]
+        try:
+            p = _render_segment(clip, sd, motion, k, scenes_dir, fade_in=(k == 0))
+        except Exception as ex:
+            print(f"[compose] scene {scene_idx} seg {k} failed ({str(ex)[:80]}) -> retry clip[0]/in")
+            p = _render_segment(valid_clips[0], sd, "in", k, scenes_dir, fade_in=(k == 0))
+        seg_paths.append(p)
+        seg_durs.append(sd)
+
+    _xfade_concat_segs(seg_paths, seg_durs, out_path)
+    for p in seg_paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    fb = os.path.join(scenes_dir, f"fallback_{scene_idx}.mp4")
+    if os.path.exists(fb):
+        try:
+            os.remove(fb)
+        except OSError:
+            pass
+    print(f"[compose] scene {scene_idx}: {len(segs)} cuts over {duration:.1f}s "
+          f"(avg {duration / max(len(segs), 1):.1f}s/cut)")
+    return out_path
+
+
 # ----- Stage 2: concat -----------------------------------------------------
 def concat_scenes(scene_paths: list[str], out_path: str) -> str:
     list_file = out_path + ".list.txt"
@@ -185,23 +337,16 @@ def compose_premium(scenes: list[dict], clips_map: dict, narration_path: str,
         if not clips:
             raise RuntimeError(f"scene {i} has no footage")
         sp = os.path.join(scenes_dir, f"scene_{i:03d}.mp4")
-        rendered = False
-        for j, clip in enumerate(clips):
-            try:
-                render_scene(clip, scene["duration"], sp, i)
-                if _valid_video(sp):
-                    rendered = True
-                    break
-                print(f"[compose] scene {i} clip {j+1} produced invalid output — trying next")
-            except Exception as e:
-                print(f"[compose] scene {i} clip {j+1} failed ({str(e)[:150]}) — trying next")
-            if os.path.exists(sp):
-                try:
-                    os.remove(sp)
-                except OSError:
-                    pass
-        if not rendered:
-            raise RuntimeError(f"scene {i}: no clip rendered successfully out of {len(clips)}")
+        timings = scene.get("sentence_timings") or []
+        try:
+            render_scene_montage(clips, scene["duration"], timings, sp, i)
+            if not _valid_video(sp):
+                raise RuntimeError("montage produced invalid output")
+        except Exception as e:
+            # last resort: old single slow-zoom render on the first valid clip
+            print(f"[compose] scene {i} montage failed ({str(e)[:150]}) -> single-clip fallback")
+            clip0 = next((c for c in clips if _valid_video(c)), clips[0])
+            render_scene(clip0, scene["duration"], sp, i)
         scene_paths.append(sp)
 
     visual = os.path.join(work, "visual.mp4")
