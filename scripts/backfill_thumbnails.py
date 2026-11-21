@@ -9,8 +9,13 @@ script sets the rendered thumbnail on every such video, using the same Composio
 path as the workflow (the committed thumbnail.png's raw GitHub URL).
 
 PREREQ (one-time): the @StickVerse channel must be phone-verified at
-  https://www.youtube.com/verify  (SMS, ~24h to activate). Until verified,
-  YouTube rejects all custom-thumbnail uploads with 403.
+  https://www.youtube.com/verify  (SMS, ~24h to activate). If you hit 403
+  "exceeded your quota" instead, that's NOT verification — Composio runs the
+  thumbnail call on a SHARED YouTube API project (across all Composio users),
+  so its quota is intermittent and resets at midnight Pacific. For reliable
+  thumbnails, set YOUTUBE_REFRESH_TOKEN (your own OAuth, see
+  get_youtube_oauth.py) so upload._set_thumbnail runs on your own 10k/day
+  quota instead of Composio's shared pool.
 
 USAGE (run from the repo root, with the Composio creds exported):
   export COMPOSIO_API_KEY=ak_...
@@ -97,9 +102,16 @@ def main():
             done += 1
         else:
             print(f"    FAILED — {msg}")
-            if "verify" in msg.lower():
+            low = msg.lower()
+            if "quota" in low or "exceeded" in low:
+                print("    >> Composio's shared YouTube API quota is exhausted (NOT a")
+                print("       verification issue). Resets at midnight Pacific. Re-run this")
+                print("       script after the reset, or set YOUTUBE_REFRESH_TOKEN (your own")
+                print("       OAuth) so future runs don't depend on Composio's shared quota.")
+                return  # all will 403 until quota resets — stop
+            if "verify" in low:
                 print("    >> Channel not verified. Verify at https://www.youtube.com/verify (~24h).")
-                return  # no point continuing — all will 403
+                return  # all will 403 until verified — stop
 
     print(f"\nDone. Thumbnails set on {done} video(s).")
     if done:
