@@ -57,7 +57,14 @@ def git_commit(message):
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
     subprocess.run(["git", "config", "user.email",
                     "github-actions[bot]@users.noreply.github.com"], check=True)
-    subprocess.run(["git", "add", "-A", "output/"], check=True)
+    # output/ is gitignored (final.mp4 + other large artifacts live there), so
+    # `git add -A output/` exits 1 on the untracked ignored files and crashes
+    # this whole step — even when the video uploaded fine. Add ONLY the marker
+    # files (the targeted approach the publish.yml "Commit metadata" step uses);
+    # -A so a marker REMOVAL (success path) is staged too. Don't check= the add:
+    # a pathspec matching nothing is harmless; the diff check below decides.
+    subprocess.run(["git", "add", "-A", "--", "output/*/THUMBNAIL_MANUAL_NEEDED.txt"],
+                   capture_output=True)
     if subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode == 0:
         print("  (no marker changes to commit)")
         return
