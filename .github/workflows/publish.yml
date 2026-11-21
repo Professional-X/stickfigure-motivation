@@ -112,8 +112,12 @@ jobs:
           # thumbnail.png was just committed by the previous step, so its
           # raw.githubusercontent.com URL is public. This step hands that URL
           # to Composio's YOUTUBE_UPDATE_THUMBNAIL action, which sets it on the
-          # just-uploaded video. On failure (e.g. channel not phone-verified)
-          # it updates THUMBNAIL_MANUAL_NEEDED.txt with the exact reason.
+          # just-uploaded video. It only runs if upload.py left a
+          # THUMBNAIL_MANUAL_NEEDED marker (the direct-API OAuth path didn't
+          # set it — usually because YOUTUBE_REFRESH_TOKEN isn't configured).
+          # On failure (e.g. Composio's shared YouTube quota exhausted, or
+          # channel not phone-verified) it updates THUMBNAIL_MANUAL_NEEDED.txt
+          # with the exact reason.
           python set_thumbnail_composio.py
 
       - name: Thumbnail status (action required if skipped)
