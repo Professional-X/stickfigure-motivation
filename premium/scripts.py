@@ -242,6 +242,61 @@ TOPICS = [
                  "success", "stoicism"],
         "hashtags": ["discipline", "motivation", "habits", "selfimprovement"],
     },
+
+    # ============================================================
+    # VIDEO 5 — Mindset (comfort zone / growth)
+    # ============================================================
+    {
+        "id": "comfort-zone-is-a-prison",
+        "category": "Mindset",
+        "title": "Your Comfort Zone Is A Prison (Not A Refuge)",
+        "hook_line": "Your comfort zone is not a refuge.",
+        "recurring_phrase": "It is a cage you built and called home.",
+        "thumbnail_text": "CAGE",
+        "scenes": [
+            {
+                "narration": "Your comfort zone is not a refuge. It is the place you retreated to the first time something hurt, the job you did not apply for, the person you did not approach, the risk you did not take, and then you told yourself you were being sensible. You were not being sensible. You were being afraid, and you renamed your fear preferences, and you have been living inside that rename ever since. The walls are not visible. That is what makes them so effective. You simply stopped going anywhere that required you to stretch.",
+                "clip_category": "mountains",
+            },
+            {
+                "narration": "Look at what comfort has cost you. Not in drama, but in absence. The skills you never built because the learning curve was steep. The relationships that never started because the first message felt risky. The version of you that never showed up because the current version preferred the couch. None of these feel like losses because they are invisible. You cannot mourn a life you never tried to live. But if you sit quietly for one honest minute, you can feel the weight of it, the specific shape of everything comfort talked you out of.",
+                "clip_category": "city",
+            },
+            {
+                "narration": "Here is the biological truth nobody markets to you. Comfort and growth are not friends. They are opposites. A system that is never stressed does not adapt. A muscle that is never loaded does not grow. A mind that is never confronted with what it cannot yet do does not sharpen. Comfort is the state of not changing, and not changing is the slowest form of decline, because the world keeps moving while you stay exactly as you were, and one day you look up and the gap between you and your own life is enormous, and you do not even know when it opened.",
+                "clip_category": "abstract",
+            },
+            {
+                "narration": "The Stoics did not romanticize suffering, but they were clear about this. The person who avoids all difficulty avoids becoming anything at all. Seneca said we should seek discomfort on purpose, not because pain is good, but because a will that is never tested is a will that does not exist. You think you are protecting yourself by staying comfortable. You are preserving a version of yourself that has no proof it can handle anything. And a self with no proof is the most fragile self there is, because it has never been dropped, so it lives in terror of the floor.",
+                "clip_category": "sky",
+            },
+            {
+                "narration": "So leave one room of the cage today. Not the whole thing. One. Send the message you have been editing for a week. Take the cold shower. Speak in the meeting. Apply for the thing you are underqualified for, which is the only kind of thing worth applying for. It will feel wrong, and that feeling is not a stop sign. It is the sensation of the wall moving, which is the sensation of you growing. The discomfort is not the cost of change. The discomfort is the change. Without it, nothing happens, ever.",
+                "clip_category": "road",
+            },
+            {
+                "narration": "Your comfort zone was never protecting you. It was preserving you, like a jar preserves a specimen, still, unchanged, and not really alive. You do not have to burn your life down. You just have to stop treating comfort as the goal and start treating it as the occasional rest between efforts, which is all it was ever meant to be. Walk out of one room today. Then another tomorrow. The cage was always unlocked. The door was never the problem. You were. And that is the best news you will hear today, because it means you are also the way out.",
+                "clip_category": "sea",
+            },
+        ],
+        "description": (
+            "Your comfort zone isn't a refuge — it's the cage you retreated to "
+            "when something once hurt, and then renamed 'sensible.'\n\n"
+            "Comfort and growth aren't friends; they're opposites. A system never "
+            "stressed doesn't adapt. The Stoics didn't romanticize suffering, but "
+            "Seneca was clear: a will never tested doesn't exist. You think you're "
+            "protecting yourself — you're preserving a self with no proof it can "
+            "handle anything.\n\n"
+            "The discomfort isn't the cost of change. It IS the change. Leave one "
+            "room of the cage today. The door was never locked.\n\n"
+            "Subscribe for weekly cinematic motivation.\n\n"
+            "#mindset #comfortzone #growth #selfimprovement #discipline"
+        ),
+        "tags": ["comfort zone", "mindset", "growth", "self improvement",
+                 "discipline", "fear", "stoicism", "personal growth",
+                 "discomfort", "potential"],
+        "hashtags": ["mindset", "comfortzone", "growth", "selfimprovement"],
+    },
 ]
 
 
