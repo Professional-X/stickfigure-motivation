@@ -1,14 +1,19 @@
 name: Backfill Thumbnails
 
-# Manually-dispatched (or API-dispatched) job that re-tries setting custom
-# thumbnails on every video still carrying a THUMBNAIL_MANUAL_NEEDED marker.
-# Use case: the publish run's Composio thumbnail call failed because Composio's
-# SHARED YouTube API quota was exhausted (resets at midnight Pacific = 08:00
-# UTC). Dispatch this after the reset to set those thumbnails. This uses the
-# same Composio path as the publish run, so it is subject to the same shared
-# quota — but at 08:10 UTC the quota is fresh.
+# Re-tries setting custom thumbnails on every video still carrying a
+# THUMBNAIL_MANUAL_NEEDED marker. Runs automatically every day at 08:30 UTC
+# (just after midnight Pacific, when Composio's SHARED YouTube API quota
+# resets at 08:00 UTC) AND on manual/API dispatch. Use case: the publish run's
+# Composio thumbnail call failed because that shared quota was exhausted; this
+# catches it the next morning. It no-ops quickly when there are no markers, so
+# leaving it scheduled is cheap. Once you set YOUTUBE_REFRESH_TOKEN (your own
+# OAuth) the publish run sets thumbnails directly and this becomes redundant —
+# you can then delete the schedule.
 
 on:
+  schedule:
+    # 08:30 UTC daily = ~30 min after midnight PT quota reset
+    - cron: "30 8 * * *"
   workflow_dispatch: {}
 
 jobs:
