@@ -3,10 +3,14 @@
 Composio YOUTUBE_UPDATE_THUMBNAIL, using the raw.githubusercontent.com URL of
 the thumbnail.png the workflow just committed to the repo.
 
-Runs AFTER the 'Commit metadata + thumbnail' step, so thumbnail.png is already
-on remote main. On success it removes the THUMBNAIL_MANUAL_NEEDED marker; on
-failure it rewrites the marker with the specific reason (e.g. channel not
-verified) and commits either way.
+This is a FALLBACK: it only runs if upload.py left a THUMBNAIL_MANUAL_NEEDED
+marker (i.e. the direct-API OAuth path — _set_thumbnail in upload.py — could
+not set the thumbnail, usually because YOUTUBE_REFRESH_TOKEN isn't configured).
+If the direct path already set the thumbnail, this step skips to avoid a
+redundant API call and a false marker on an already-thumbnail'd video.
+
+On success it removes the marker; on failure it rewrites the marker with the
+specific reason (quota exhausted / not verified / other) and commits either way.
 """
 import glob
 import os
@@ -71,6 +75,14 @@ def main():
     if not vid:
         print(f"[set-thumb] {d}: no video_id in uploaded.txt — skip")
         return 0
+    marker = os.path.join(d, "THUMBNAIL_MANUAL_NEEDED.txt")
+    if not os.path.exists(marker):
+        # Direct-API OAuth path (upload._set_thumbnail) already set the
+        # thumbnail, or upload produced no marker. Composio is only a fallback
+        # for when the direct path couldn't run — skip the redundant call.
+        print(f"[set-thumb] {d.strip('/')}: no THUMBNAIL_MANUAL_NEEDED marker — "
+              "direct-API path already handled it. Skip.")
+        return 0
     raw_url = f"{RAW_BASE}/{d}thumbnail.png"
     print(f"[set-thumb] run={d.strip('/')} video={vid}")
     print(f"  thumbnail URL: {raw_url}")
@@ -80,7 +92,6 @@ def main():
         return 0
 
     ok, msg = upload._set_thumbnail_via_composio(vid, raw_url)
-    marker = os.path.join(d, "THUMBNAIL_MANUAL_NEEDED.txt")
 
     if ok:
         print(f"[set-thumb] SUCCESS — custom thumbnail set on {vid}")
@@ -90,13 +101,26 @@ def main():
         return 0
 
     print(f"[set-thumb] FAILED — {msg}")
+    low = msg.lower()
     with open(marker, "w") as f:
         f.write(f"video_url: https://youtube.com/watch?v={vid}\n")
         f.write(f"studio_edit: https://studio.youtube.com/video/{vid}/editing\n")
         f.write(f"primary_thumbnail (committed): {d}thumbnail.png\n")
         f.write(f"raw_url: {raw_url}\n")
         f.write(f"\nAuto-set via Composio YOUTUBE_UPDATE_THUMBNAIL FAILED:\n  {msg}\n")
-        if "verify" in msg.lower():
+        if "quota" in low or "exceeded" in low:
+            f.write("\n>> YouTube API QUOTA EXHAUSTED. Composio runs the thumbnail\n")
+            f.write("   call on a SHARED YouTube API project (across all Composio users),\n")
+            f.write("   so its quota is intermittent. This is NOT a channel/verification\n")
+            f.write("   problem. The quota resets at midnight Pacific time. Options:\n")
+            f.write("     - wait for the next scheduled run (Mon/Wed/Fri 17:00 UTC) — it\n")
+            f.write("       retries automatically, or\n")
+            f.write("     - run scripts/backfill_thumbnails.py after the quota resets, or\n")
+            f.write("     - add your own YouTube OAuth secrets (YOUTUBE_CLIENT_ID,\n")
+            f.write("       YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN — see\n")
+            f.write("       get_youtube_oauth.py) so uploads + thumbnails use YOUR\n")
+            f.write("       10,000-unit/day quota instead of Composio's shared pool.\n")
+        elif "verify" in low:
             f.write("\n>> The @StickVerse YouTube channel is NOT phone-verified.\n")
             f.write("   Verify at https://www.youtube.com/verify (SMS, ~24h to activate),\n")
             f.write("   then re-run this workflow OR run scripts/backfill_thumbnails.py.\n")
