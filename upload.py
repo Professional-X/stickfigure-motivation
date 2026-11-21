@@ -106,8 +106,12 @@ def _set_thumbnail_via_composio(video_id: str, thumbnail_url: str) -> tuple[bool
     (JPG/GIF/PNG, <2MB); typically the raw.githubusercontent.com URL of the
     thumbnail.png the workflow commits to the repo.
 
-    Returns (ok, message). Most common failure: channel not phone-verified
-    (YouTube returns 403 -> verify at https://www.youtube.com/verify).
+    Returns (ok, message). Most common failure: the Composio-shared YouTube
+    API quota is exhausted (403 "exceeded your quota") — intermittent because
+    Composio runs the call on a project shared across all its users; it resets
+    at midnight Pacific. Second most common: channel not phone-verified (403).
+    Fix the former by setting YOUTUBE_REFRESH_TOKEN (your own OAuth) so
+    upload._set_thumbnail handles it on your own quota instead.
     """
     if not (config.COMPOSIO_API_KEY and config.COMPOSIO_ENTITY_ID):
         return False, "Composio creds not configured"
