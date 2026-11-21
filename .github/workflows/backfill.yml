@@ -1,0 +1,51 @@
+name: Backfill Thumbnails
+
+# Manually-dispatched (or API-dispatched) job that re-tries setting custom
+# thumbnails on every video still carrying a THUMBNAIL_MANUAL_NEEDED marker.
+# Use case: the publish run's Composio thumbnail call failed because Composio's
+# SHARED YouTube API quota was exhausted (resets at midnight Pacific = 08:00
+# UTC). Dispatch this after the reset to set those thumbnails. This uses the
+# same Composio path as the publish run, so it is subject to the same shared
+# quota — but at 08:10 UTC the quota is fresh.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Backfill thumbnails (set on all videos flagged MANUAL_NEEDED)
+        env:
+          COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
+          COMPOSIO_ENTITY_ID: ${{ secrets.COMPOSIO_ENTITY_ID }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/backfill_thumbnails.py
+
+      - name: Commit removed markers
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # output/ is gitignored — only touch the marker files (same targeted
+          # approach as the publish workflow's commit step).
+          git add -A -- output/*/THUMBNAIL_MANUAL_NEEDED.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: thumbnails backfilled [skip ci]"
+            git push
+            echo "pushed marker removals"
+          else
+            echo "no marker changes to commit"
+          fi
