@@ -84,6 +84,20 @@ IMAGE_SEED = 42  # fixed base seed for visual consistency across scenes
 TTS_VOICE = "en-US-AndrewMultilingualNeural"  # warm, natural, softer male (was en-US-GuyNeural — too hard/robotic for the "softer + human" brief)
 TTS_RATE = "-8%"  # slightly slower for gravitas
 
+# Narration playback speed. 1.0 = as-synthesized; 1.4 = the "sounds real and
+# good" cadence the user picked after A/B-listening (matches YouTube's 1.4x
+# playback). Applied as an atempo time-stretch on each scene's assembled audio
+# BEFORE durations/timings are measured, so the visual cuts, Whisper subtitles
+# and ducked music all stay perfectly aligned with the faster voice. atempo
+# preserves pitch (WSOLA), so the voice stays natural — no chipmunk effect.
+NARRATION_SPEED = 1.4
+
+# Topical AI scene stills: how many UNIQUE generated stills to produce per
+# scene. They are alternated across that scene's rapid-cut segments so no two
+# consecutive cuts share the same frame. 2 = strong variety at ~9 min gen time
+# on free Pollinations; raise to 3+ if IMAGE_PROVIDER=cloudflare (no rate limit).
+VISUALS_PER_SCENE = 2
+
 
 # ============================================================
 # Video specs
