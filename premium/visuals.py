@@ -1,35 +1,36 @@
-"""Topical AI-generated scene stills — the "show the THING the script is about" system.
+"""Topical AI frames — v2: ONE unique image PER CUT, zero reuse, ever.
 
-This replaces the old generic Mixkit stock footage (mountains/city/sea/sky
-categories → "random sunset, random mountain" that had nothing to do with the
-script) with UNIQUE, watermark-free stills generated on demand from each
-scene's actual narration.
+v1's mistake: 12 stills per video cycled across ~63 rapid cuts — every still
+was shown ~5 times and the video read as "the same frames on loop". v2 fixes
+this structurally: the montage's segment plan (one cut per 2.2-4.4s narration
+beat, ~45-63 cuts/video) is computed FIRST, and every single cut gets its OWN
+image, derived from the exact words spoken during that cut. Once a cut's image
+has played, it is never used again — in this video or any future one.
 
-Pipeline:
-  1. derive_scene_prompts(topic, scenes, per_scene)
-       ONE batched LLM call (same OpenRouter/NVIDIA client the script generator
-       uses) turns each scene's narration into `per_scene` distinct cinematic
-       image prompts that depict what the words are actually about. Falls back
-       to a keyword heuristic if the LLM is unavailable, so the pipeline never
-       blocks on LLM availability.
-  2. generate_still(prompt, out_path, seed)
-       Pollinations (free, no auth, no watermark) by default, or Cloudflare
-       Workers AI if configured. The seed is derived from the prompt itself, so
-       every (topic, scene, variant) gets a deterministic-but-globally-unique
-       image that is never regenerated verbatim.
-  3. fetch_stills_for_scenes(topic, scenes, stills_dir, per_scene)
-       Generates `per_scene` stills per scene, returns {scene_idx: [paths]},
-       and records every prompt+seed in premium/visuals_library.json so no
-       visual is ever reused across videos (the registry is committed by
-       publish.yml alongside topics_library.json).
+How:
+  1. segment_texts(plans, timings)
+       Maps each planned cut to the narration text it covers (sentences whose
+       midpoint falls inside the cut).
+  2. derive_segment_prompts(topic, scene_segments)
+       ONE batched LLM call PER SCENE turns those cut texts into one concrete
+       cinematic image prompt per cut ("show the thing the words are about").
+       Keyword heuristic per cut as fallback; duplicate prompts inside a video
+       are mutated until unique.
+  3. generate_one(prompt, out_path, seed)
+       Free-provider chain, no watermarks:
+         Pollinations flux (2 tries) -> Pollinations turbo (2 tries) ->
+         Openverse CC photo (registry-deduped) -> procedural gradient (PIL,
+         deterministic-unique — the guaranteed floor).
+       A global adaptive-pacing lock backs off when Pollinations returns 402
+       (their per-IP quota window) so parallel workers don't hammer the limiter.
+  4. fetch_stills_for_segments(topic, scenes, plans, out_dir)
+       Runs all cuts through a worker pool (config.VISUALS_WORKERS), returns
+       {scene_idx: [cut0_path, cut1_path, ...]} ALIGNED to the plan — the
+       caller can index stills[k] for cut k directly. Every entry is a real,
+       valid image file: the chain never returns None.
 
-The stills are rendered into motion by premium/compose.py (Ken Burns zoom/pan
-+ cinematic grade), alternated across each scene's rapid-cut segments so no
-two consecutive cuts share the same frame. Viewers now see content that
-matches the script instead of looping generic B-roll.
-
-All imagery is free + non-watermarked: Pollinations flux is free with no
-attribution; Cloudflare Workers AI is free up to 10k neurons/day.
+Every prompt+seed+source is recorded in premium/visuals_library.json (committed
+by publish.yml) so no image is ever regenerated verbatim in a later video.
 """
 import os
 import re
@@ -37,30 +38,36 @@ import json
 import time
 import zlib
 import random
+import threading
 import requests
+from concurrent.futures import ThreadPoolExecutor
 
 import config
 
-# Registry of every still ever generated, so prompts/seeds never repeat across
-# videos. Committed to the repo by publish.yml (same pattern as topics_library).
+# Registry of every frame ever generated (committed by publish.yml).
 LIBRARY_PATH = os.path.join(os.path.dirname(__file__), "visuals_library.json")
 
-# Pollinations: free, no auth. flux returns a fixed 1024x576 (it ignores the
-# width/height query params); compose.py lanczos-upscales to 1920x1080.
-POLL_URL = config.POLLINATIONS_URL
-POLL_MODEL = config.POLLINATIONS_MODEL  # 'flux' | 'turbo'
+POLL_URL = config.POLLINATIONS_URL          # https://image.pollinations.ai/prompt
+REFERRER = getattr(config, "POLLINATIONS_REFERRER", "")
 
-# Modest spacing between Pollinations calls (free tier rate-limits sustained
-# bursts). Retry-with-backoff handles the rare 429, so this can stay small.
-CALL_DELAY = 6.0
-MAX_ATTEMPTS = 4
-RATE_BACKOFF = 25.0  # seconds to wait after a 429 / empty response
+# Pollinations free tier is per-IP quota'd: burst requests get HTTP 402 until
+# the window refills (~30-60s). One image per cut means ~45-60 generations, so
+# workers share a global pacing lock: after ANY 402, everyone waits out the
+# refill window instead of burning attempts. flux first (best quality), turbo
+# as in-service failover (faster, lighter quota), then Openverse photos, then
+# a procedural gradient that can never repeat.
+FLUX_TRIES = 2
+TURBO_TRIES = 2
+TRY_BACKOFF = [8, 22]          # seconds between attempts within one model
+QUOTA_COOLDOWN = 32.0          # global wait after a 402 (shared by all workers)
+OPENVERSE_URL = "https://api.openverse.org/v1/images/"
+
+_lock = threading.Lock()
+_last_402 = 0.0                # monotonic ts of the most recent quota hit
 
 
-# ----- LLM client (prefers the NVIDIA key generate.py uses — confirmed set in
-# production; falls back to the OpenRouter config if NVIDIA_API_KEY is absent) ----
+# ----- LLM client (NVIDIA key first — confirmed set in production) ------------
 def _llm_config() -> tuple[str, str, str]:
-    """Return (api_key, base_url, model) for whichever LLM provider is available."""
     nkey = getattr(config, "NVIDIA_API_KEY", "") or os.environ.get("NVIDIA_API_KEY") or ""
     if nkey:
         return nkey, config.NVIDIA_BASE_URL, config.NVIDIA_MODEL
@@ -82,101 +89,42 @@ def _llm_client():
 
 SYSTEM_PROMPT = """You are the art director for @StickVerse, a cinematic stoic/discipline motivation channel.
 
-For each scene of a script you are given, you design DISTINCT visual concepts for the still images that will appear behind the narration. The image MUST depict what the scene is literally talking about — the concrete subject, object, place, action or metaphor in the words — NOT generic pretty scenery.
+You are given the narration of ONE video scene, already split into the exact cuts the editor will make (each cut = 2-4 seconds of voiceover). For EACH cut you design ONE image. The image MUST show what THAT cut's words are literally about — the concrete subject, object, place, action or metaphor — not generic scenery.
 
-Rules for every prompt:
+Rules:
   - Photorealistic cinematic film still, 16:9 wide composition.
-  - Name the SPECIFIC subject tied to the narration (a cold shower, an unmade bed at 6am, a lone climber on a switchback, a half-finished manuscript, a mirror, a stopwatch, a withered leaf, a packed gym bag, etc.). Never default to "mountains at sunset" or "waves on a beach" unless the words actually call for them.
-  - Moody dramatic lighting, shallow depth of field, muted teal-and-orange grade, sense of weight or solitude. No people smiling at cameras.
-  - NO text, NO captions, NO logos, NO watermarks, NO collages, NO split-screen.
-  - One composition per prompt. 12-30 words. Plain prose, no markdown.
-  - Each prompt in a scene must be a DIFFERENT composition (different angle/subject moment), not a rephrase.
+  - Name the SPECIFIC subject of THAT cut (a cold shower running, knuckles wrapping before a punch, an unopened resume on a desk, shackles on a stone floor, a phone face-down at dinner, etc.). Consecutive cuts tell a SEQUENCE — vary the shot: wide establishing, close detail, over-shoulder, low angle, silhouette, hands only, environment empty of people.
+  - Moody dramatic lighting, shallow depth of field, muted teal-and-orange grade. No smiling-at-camera people.
+  - NO text, captions, logos, watermarks, collages, split-screen.
+  - 12-30 words, plain prose, one composition each, DIFFERENT from every other cut.
 
-You output ONLY a JSON object of the EXACT shape: {"prompts": [{"scene": <1-based>, "variant": <1-based>, "prompt": "<image prompt>"}, ...]}. No markdown fences, no commentary, no reasoning."""
-
-
-def _user_prompt(topic: dict, scenes: list, per_scene: int) -> str:
-    scene_lines = []
-    for i, s in enumerate(scenes):
-        scene_lines.append(f"SCENE {i+1} ({s.get('clip_category','')}): {s['narration']}")
-    total = per_scene * len(scenes)
-    return f"""VIDEO TITLE: {topic.get('title','')}
-CATEGORY: {topic.get('category','')}
-
-Write EXACTLY {per_scene} distinct image prompts for EACH of the {len(scenes)} scenes — {total} prompts total, ALL in this single response. Every prompt must depict what THAT scene's narration is about.
-
-{chr(10).join(scene_lines)}
-
-Return ONLY this JSON object (fill the array with all {total} objects, ordered by scene then variant):
-{{"prompts": [{{"scene": 1, "variant": 1, "prompt": "..."}}, ...]}}"""
+You output ONLY a JSON object: {"prompts": [{"seg": <1-based cut number>, "prompt": "<image prompt>"}, ...]} — one entry per cut, no markdown, no commentary."""
 
 
-def derive_scene_prompts(topic: dict, scenes: list, per_scene: int = 2) -> list[dict]:
-    """Return [{scene (0-based), variant (0-based), prompt}, ...] length len(scenes)*per_scene.
+def _scene_llm_prompt(topic: dict, scene: dict, cut_texts: list[str]) -> str:
+    lines = [f"CUT {j+1}: {t}" for j, t in enumerate(cut_texts)]
+    return f"""VIDEO: {topic.get('title','')} ({topic.get('category','')})
+SCENE CATEGORY: {scene.get('clip_category','')}
 
-    One batched LLM call for the whole video. On any failure, falls back to a
-    keyword heuristic derived from each scene's narration so the pipeline still
-    gets topical, unique prompts without an LLM.
-    """
-    if not _llm_available():
-        print("[visuals] no LLM key -> heuristic prompts")
-        return _heuristic_prompts(topic, scenes, per_scene)
-    try:
-        client = _llm_client()
-        _, _, model = _llm_config()
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _user_prompt(topic, scenes, per_scene)},
-            ],
-            temperature=0.8,
-            top_p=0.9,
-            max_tokens=12000,  # nemotron is a reasoning model — needs headroom for
-                               # reasoning_content before it emits all 12 prompts
-            response_format={"type": "json_object"},
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-        if not raw:
-            raise RuntimeError("empty content (reasoning consumed the budget)")
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
-        # expected shape: {"prompts": [...]} ; also tolerate a bare array or
-        # any single list-valued key the model might wrap it under
-        if isinstance(data, list):
-            arr = data
-        elif isinstance(data, dict):
-            arr = data.get("prompts") or next(
-                (v for v in data.values() if isinstance(v, list)), [])
-        else:
-            arr = []
-        out = []
-        for item in arr:
-            try:
-                scene = int(item["scene"]) - 1
-                variant = int(item.get("variant", 1)) - 1
-                prompt = str(item["prompt"]).strip()
-            except Exception:
-                continue
-            if 0 <= scene < len(scenes) and prompt:
-                out.append({"scene": scene, "variant": variant,
-                            "prompt": prompt, "_llm": True})
-        # fill any missing (scene,variant) slots from the heuristic
-        have = {(o["scene"], o["variant"]) for o in out}
-        for o in _heuristic_prompts(topic, scenes, per_scene, verbose=False):
-            if (o["scene"], o["variant"]) not in have:
-                out.append(o)
-                have.add((o["scene"], o["variant"]))
-        out.sort(key=lambda o: (o["scene"], o["variant"]))
-        n_llm = sum(1 for o in out if o.get("_llm"))
-        print(f"[visuals] LLM derived {len(out)} topical prompts "
-              f"({n_llm} from LLM, {len(out)-n_llm} heuristic fill; "
-              f"{len(scenes)} scenes x {per_scene})")
-        return out
-    except Exception as e:
-        print(f"[visuals] LLM prompt derivation failed ({type(e).__name__}: {str(e)[:120]}) -> heuristic")
-        return _heuristic_prompts(topic, scenes, per_scene)
+Write ONE image prompt for EACH of the {len(cut_texts)} cuts below — {len(cut_texts)} prompts total, ALL in this single response:
+
+{chr(10).join(lines)}
+
+Return ONLY: {{"prompts": [{{"seg": 1, "prompt": "..."}}, ...]}}"""
+
+
+# ----- segment -> narration text mapping --------------------------------------
+def segment_texts(plan: list[tuple[float, float]], timings: list[dict]) -> list[str]:
+    """For each planned cut (start,end) return the narration text it covers
+    (sentences whose midpoint falls inside the cut)."""
+    out = []
+    for (s, e) in plan:
+        mid_texts = [t["text"] for t in timings
+                     if s <= (t["start"] + t["end"]) / 2 < e]
+        if not mid_texts:  # short cut between sentence gaps
+            mid_texts = [t["text"] for t in timings if t["start"] < e and t["end"] > s]
+        out.append(" ".join(mid_texts) or "silence beat")
+    return out
 
 
 _STOPWORDS = {
@@ -191,101 +139,210 @@ _STOPWORDS = {
 }
 
 
-def _keywords(text: str, k: int = 6) -> list[str]:
+def _keywords(text: str, k: int = 5) -> list[str]:
     words = re.findall(r"[A-Za-z]{4,}", text.lower())
     freq = {}
     for w in words:
         if w in _STOPWORDS:
             continue
         freq[w] = freq.get(w, 0) + 1
-    ranked = sorted(freq, key=lambda w: (-freq[w], w))
-    return ranked[:k]
+    return sorted(freq, key=lambda w: (-freq[w], w))[:k]
 
 
-def _heuristic_prompts(topic: dict, scenes: list, per_scene: int,
-                       verbose: bool = True) -> list[dict]:
-    """Keyword-derived prompts when the LLM is unavailable. Less poetic but
-    still topical (depicts words from the actual narration) and unique per
-    scene thanks to the per-scene keyword extraction + seed."""
+def _heuristic_prompt(topic: dict, text: str, idx: int) -> str:
     cat = topic.get("category", "motivation").lower()
-    out = []
-    for i, s in enumerate(scenes):
-        kws = _keywords(s["narration"], k=5 + per_scene)
-        for v in range(per_scene):
-            pick = kws[v * 2:v * 2 + 4] or kws[:4]
-            subject = ", ".join(pick) if pick else "a lone figure, an empty road, dawn light"
-            out.append({
-                "scene": i,
-                "variant": v,
-                "prompt": (f"cinematic film still, {subject}, {cat} mood, "
-                           "dramatic moody lighting, muted teal and orange grade, "
-                           "wide composition, shallow depth of field, no text, no watermark"),
-            })
-    if verbose:
-        print(f"[visuals] heuristic prompts: {len(out)} ({len(scenes)} scenes x {per_scene})")
-    return out
+    kws = _keywords(text, k=4)
+    subject = ", ".join(kws) if kws else "a lone figure on an empty road at dawn"
+    angles = ["wide establishing shot", "extreme close-up detail",
+              "low angle looking up", "over-the-shoulder view",
+              "silhouette against light", "hands only in frame"]
+    return (f"cinematic film still, {subject}, {angles[idx % len(angles)]}, "
+            f"{cat} mood, dramatic moody lighting, muted teal and orange grade, "
+            "shallow depth of field, no text, no watermark")
 
 
-# ----- image generation -------------------------------------------------------
+# ----- prompt derivation (one LLM call per scene) ------------------------------
+def derive_segment_prompts(topic: dict, scene_idx: int, scene: dict,
+                           cut_texts: list[str], seen: set[str]) -> list[str]:
+    """Return one image prompt per cut of this scene. LLM batched per scene,
+    heuristic per cut as fallback, duplicates mutated until unique."""
+    n = len(cut_texts)
+    prompts: list[str | None] = [None] * n
+    if _llm_available():
+        try:
+            client = _llm_client()
+            _, _, model = _llm_config()
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": _scene_llm_prompt(topic, scene, cut_texts)},
+                ],
+                temperature=0.85,
+                top_p=0.9,
+                max_tokens=12000,   # nemotron reasons before answering
+                response_format={"type": "json_object"},
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            if not raw:
+                raise RuntimeError("empty content")
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
+            arr = data if isinstance(data, list) else (
+                data.get("prompts") or next((v for v in data.values()
+                                             if isinstance(v, list)), []))
+            for item in arr:
+                try:
+                    j = int(item["seg"]) - 1
+                    p = str(item["prompt"]).strip()
+                except Exception:
+                    continue
+                if 0 <= j < n and p:
+                    prompts[j] = p
+        except Exception as e:
+            print(f"[visuals] scene {scene_idx}: LLM failed ({type(e).__name__}: "
+                  f"{str(e)[:90]}) -> heuristic prompts")
+    n_llm = 0
+    for j in range(n):
+        p = prompts[j] or _heuristic_prompt(topic, cut_texts[j], j)
+        if prompts[j]:
+            n_llm += 1
+        # enforce uniqueness within this video
+        base = p
+        m = 0
+        while p.lower() in seen:
+            m += 1
+            p = f"{base}, alternate composition {m}, different angle and subject moment"
+        seen.add(p.lower())
+        prompts[j] = p
+    print(f"[visuals] scene {scene_idx}: {n_llm}/{n} prompts from LLM "
+          f"({n} cuts, all unique)")
+    return prompts  # type: ignore[return-value]
+
+
+# ----- image providers ---------------------------------------------------------
 def _seed_for(prompt: str, salt: int = 0) -> int:
-    """Deterministic seed from the prompt text (+ optional salt). Same prompt
-    + salt -> same image; different prompts -> different images."""
     h = zlib.crc32(prompt.encode("utf-8")) & 0xFFFFFFFF
     return (h ^ (salt * 2654435761)) & 0x7FFFFFFF
 
 
-def _generate_pollinations(prompt: str, out_path: str, seed: int) -> str:
+def _respect_quota() -> None:
+    """If any worker recently hit the 402 quota window, wait it out globally."""
+    global _last_402
+    while True:
+        with _lock:
+            wait = _last_402 + QUOTA_COOLDOWN - time.monotonic()
+        if wait <= 0:
+            return
+        time.sleep(min(wait, 5.0))
+
+
+def _poll_request(model: str, prompt: str, seed: int, out_path: str) -> str:
     url = f"{POLL_URL}/{requests.utils.quote(prompt, safe='')}"
-    params = {"width": 1280, "height": 720, "seed": seed,
-              "model": POLL_MODEL, "nologo": "true"}
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        try:
-            r = requests.get(url, params=params, timeout=120, stream=True)
-            ctype = r.headers.get("content-type", "")
-            if r.status_code == 200 and "image" in ctype:
-                data = r.content
-                if len(data) > 3000:  # real image, not a tiny error stub
-                    with open(out_path, "wb") as f:
-                        f.write(data)
-                    return out_path
-            print(f"  [visuals] pollinations attempt {attempt}: HTTP {r.status_code} "
-                  f"({ctype[:30]}, {len(r.content)}B) -> retry in {RATE_BACKOFF}s")
-        except Exception as e:
-            print(f"  [visuals] pollinations attempt {attempt} error: {str(e)[:80]}")
-        time.sleep(RATE_BACKOFF * attempt)
-    raise RuntimeError(f"pollinations failed after {MAX_ATTEMPTS} attempts")
+    params = {"width": 1280, "height": 720, "seed": seed, "model": model,
+              "nologo": "true", "referrer": REFERRER}
+    r = requests.get(url, params=params, timeout=150, stream=True)
+    ctype = r.headers.get("content-type", "")
+    if r.status_code == 402 or r.status_code == 429:
+        global _last_402
+        with _lock:
+            _last_402 = time.monotonic()
+        raise RuntimeError(f"quota HTTP {r.status_code}")
+    if r.status_code == 200 and "image" in ctype and len(r.content) > 3000:
+        with open(out_path, "wb") as f:
+            f.write(r.content)
+        return out_path
+    raise RuntimeError(f"bad response HTTP {r.status_code} ({ctype[:24]}, {len(r.content)}B)")
 
 
-def _generate_cloudflare(prompt: str, out_path: str, seed: int) -> str:
-    url = config.CLOUDFLARE_FLUX_URL
-    r = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {config.CLOUDFLARE_API_TOKEN}",
-                 "Content-Type": "application/json"},
-        json={"prompt": prompt, "seed": seed, "steps": 4},
-        timeout=120,
-    )
+def _gen_pollinations(prompt: str, out_path: str, seed: int) -> str:
+    for model, tries in (("flux", FLUX_TRIES), ("turbo", TURBO_TRIES)):
+        for i in range(tries):
+            _respect_quota()
+            try:
+                return _poll_request(model, prompt, seed, out_path)
+            except RuntimeError as e:
+                if "quota" not in str(e) and i == tries - 1 and model == "turbo":
+                    raise
+                time.sleep(TRY_BACKOFF[min(i, len(TRY_BACKOFF) - 1)])
+            except Exception as e:
+                print(f"  [visuals] {model} error: {str(e)[:70]}")
+                time.sleep(TRY_BACKOFF[min(i, len(TRY_BACKOFF) - 1)])
+    raise RuntimeError("pollinations flux+turbo exhausted")
+
+
+def _gen_openverse(prompt: str, out_path: str, seed: int) -> str:
+    """Free CC-licensed photo search (no key, no watermark) as a fallback."""
+    kws = _keywords(prompt, k=3) or ["cinematic", "moody"]
+    params = {"q": " ".join(kws[:2]), "license_type": "commercial",
+              "per_page": 8, "fields": "id,url,thumbnail"}
+    r = requests.get(OPENVERSE_URL, params=params, timeout=60,
+                     headers={"User-Agent": REFERRER or "stickverse"})
     if r.status_code != 200:
-        raise RuntimeError(f"cloudflare HTTP {r.status_code}: {r.text[:120]}")
-    data = r.json().get("result", {}).get("image")
-    if not data:
-        raise RuntimeError("cloudflare returned no image")
-    # CF returns base64 image bytes
-    import base64
-    with open(out_path, "wb") as f:
-        f.write(base64.b64decode(data))
+        raise RuntimeError(f"openverse HTTP {r.status_code}")
+    for item in r.json().get("results", []):
+        for field in ("url", "thumbnail"):
+            src = item.get(field)
+            if not src:
+                continue
+            try:
+                img = requests.get(src, timeout=60, stream=True)
+                if img.status_code == 200 and "image" in img.headers.get(
+                        "content-type", "") and len(img.content) > 20000:
+                    with open(out_path, "wb") as f:
+                        f.write(img.content)
+                    return out_path
+            except Exception:
+                continue
+    raise RuntimeError("openverse: no usable image")
+
+
+def procedural_still(out_path: str, seed: int) -> str:
+    """Deterministic-unique cinematic gradient frame (PIL). The guaranteed
+    floor: always succeeds, never repeats (palette derived from the seed)."""
+    from PIL import Image, ImageDraw, ImageFilter
+    rng = random.Random(seed)
+    w, h = 1280, 720
+    base = rng.randint(8, 30)
+    hue_shift = rng.randint(-14, 14)
+    top = (max(0, base + 4 + hue_shift), max(0, base + 8), max(0, base + 14 - hue_shift))
+    bot = (max(0, base // 2), max(0, base // 2 + 3), max(0, base // 2 + 6))
+    im = Image.new("RGB", (w, h))
+    px = im.load()
+    for y in range(h):
+        t = y / h
+        row = tuple(int(top[c] + (bot[c] - top[c]) * t) for c in range(3))
+        for x in range(w):
+            px[x, y] = row
+    # soft diagonal light streak + vignette so it reads as a graded frame
+    streak = Image.new("L", (w, h), 0)
+    d = ImageDraw.Draw(streak)
+    x0 = rng.randint(w // 5, w - w // 5)
+    d.line([(x0, -50), (x0 - rng.randint(120, 300), h + 50)], fill=26, width=rng.randint(90, 200))
+    streak = streak.filter(ImageFilter.GaussianBlur(60))
+    im = Image.composite(Image.new("RGB", (w, h), (70, 88, 96)), im, streak)
+    vig = Image.new("L", (w, h), 0)
+    dv = ImageDraw.Draw(vig)
+    dv.ellipse([-w // 3, -h // 3, w + w // 3, h + h // 3], fill=255)
+    vig = vig.filter(ImageFilter.GaussianBlur(120))
+    dark = Image.new("RGB", (w, h), (2, 3, 5))
+    im = Image.composite(im, dark, vig)
+    im.save(out_path, "JPEG", quality=88)
     return out_path
 
 
-def generate_still(prompt: str, out_path: str, seed: int) -> str:
-    """Generate one still. Provider chosen by config.IMAGE_PROVIDER."""
-    provider = (config.IMAGE_PROVIDER or "pollinations").lower()
-    if provider == "cloudflare" and config.CLOUDFLARE_API_TOKEN:
-        try:
-            return _generate_cloudflare(prompt, out_path, seed)
-        except Exception as e:
-            print(f"  [visuals] cloudflare failed ({str(e)[:80]}) -> pollinations fallback")
-    return _generate_pollinations(prompt, out_path, seed)
+def generate_one(prompt: str, out_path: str, seed: int) -> tuple[str, str]:
+    """Full provider chain for one cut. Returns (path, source). Always succeeds."""
+    try:
+        return _gen_pollinations(prompt, out_path, seed), "pollinations"
+    except Exception as e:
+        print(f"  [visuals] pollinations exhausted ({str(e)[:60]}) -> openverse")
+    try:
+        return _gen_openverse(prompt, out_path, seed), "openverse"
+    except Exception as e:
+        print(f"  [visuals] openverse failed ({str(e)[:60]}) -> procedural frame")
+    return procedural_still(out_path, seed), "procedural"
 
 
 # ----- registry ---------------------------------------------------------------
@@ -312,83 +369,98 @@ def _used_seeds(path: str = LIBRARY_PATH) -> set:
 
 
 # ----- orchestrator -----------------------------------------------------------
-def fetch_stills_for_scenes(topic: dict, scenes: list, stills_dir: str,
-                            per_scene: int = 2, seed_salt: int = 0) -> dict:
-    """Generate `per_scene` unique topical stills per scene.
+def fetch_stills_for_segments(topic: dict, scenes: list,
+                              plans: dict[int, list[tuple[float, float]]],
+                              stills_dir: str) -> dict[int, list[str]]:
+    """Generate ONE unique image per planned cut.
 
-    Returns {scene_idx: [still_path,...]} with exactly `per_scene` paths per
-    scene where generation succeeded (fewer on partial failure; empty list if
-    the scene fully failed so the caller can Mixkit-fallback just that scene).
-
-    `seed_salt` lets a re-run of the SAME topic produce fresh visuals (the
-    queue normally serves fresh topics, so the default 0 is fine; pass a
-    run-counter to force novelty on a deliberate re-publish).
+    plans: {scene_idx: [(start,end), ...]} from compose.segment_plan.
+    Returns {scene_idx: [cut0_path, cut1_path, ...]} — len(list) == len(plan),
+    every entry a valid image file (chain floor = procedural, never None).
     """
     os.makedirs(stills_dir, exist_ok=True)
-    prompts = derive_scene_prompts(topic, scenes, per_scene)
+    cap = int(getattr(config, "VISUALS_MAX_PER_VIDEO", 96))
+    seen_prompts: set[str] = set()
     used = _used_seeds()
 
-    result: dict[int, list[str]] = {i: [] for i in range(len(scenes))}
-    recorded = []
-    last_call = 0.0
-    ok = 0
-    for p in prompts:
-        si, vi = p["scene"], p["variant"]
-        seed = _seed_for(p["prompt"], salt=seed_salt)
-        # guarantee global uniqueness: bump seed until it's unused
-        while seed in used:
-            seed = (seed + 1) & 0x7FFFFFFF
-        out_path = os.path.join(stills_dir, f"scene_{si:02d}_v{vi}.jpg")
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 3000:
-            # cached from a prior partial run — reuse, still record it
-            result[si].append(out_path)
+    # 1. prompts + seeds assigned serially (deterministic, registry-unique)
+    jobs = []   # (scene_idx, cut_idx, prompt, seed, out_path, cached)
+    total_cuts = 0
+    for i, scene in enumerate(scenes):
+        plan = plans.get(i, [])
+        texts = segment_texts(plan, scene.get("sentence_timings") or [])
+        prompts = derive_segment_prompts(topic, i, scene, texts, seen_prompts)
+        for j, prompt in enumerate(prompts):
+            if total_cuts >= cap:
+                prompt = f"procedural frame budget-cap {total_cuts}"
+            seed = _seed_for(f"{topic.get('id')}|{i}|{j}|{prompt}")
+            while seed in used:
+                seed = (seed + 1) & 0x7FFFFFFF
             used.add(seed)
-            recorded.append({"topic_id": topic.get("id"), "scene": si,
-                             "variant": vi, "prompt": p["prompt"],
-                             "seed": seed, "path": os.path.basename(out_path)})
-            ok += 1
-            continue
-        # pace the free-tier rate limiter
-        gap = time.time() - last_call
-        if gap < CALL_DELAY:
-            time.sleep(CALL_DELAY - gap)
-        last_call = time.time()
-        try:
-            generate_still(p["prompt"], out_path, seed)
-            result[si].append(out_path)
-            used.add(seed)
-            recorded.append({"topic_id": topic.get("id"), "scene": si,
-                             "variant": vi, "prompt": p["prompt"],
-                             "seed": seed, "path": os.path.basename(out_path)})
-            ok += 1
-            print(f"[visuals] scene {si} v{vi}: {os.path.getsize(out_path)//1024} KB "
-                  f"(seed {seed})")
-        except Exception as e:
-            print(f"[visuals] scene {si} v{vi} FAILED ({str(e)[:90]}) -> Mixkit will cover it")
+            out_path = os.path.join(stills_dir, f"s{i:02d}_c{j:03d}.jpg")
+            cached = os.path.exists(out_path) and os.path.getsize(out_path) > 3000
+            jobs.append((i, j, prompt, seed, out_path, cached))
+            total_cuts += 1
+    print(f"[visuals] {total_cuts} cuts -> {total_cuts} unique frames "
+          f"({len(scenes)} scenes, workers={getattr(config, 'VISUALS_WORKERS', 4)})")
 
+    # 2. generate in parallel
+    result: dict[int, list[str | None]] = {i: [None] * len(plans.get(i, []))
+                                           for i in range(len(scenes))}
+    counts = {"pollinations": 0, "openverse": 0, "procedural": 0, "cached": 0}
+    recorded = []
+    rec_lock = threading.Lock()
+
+    def work(job):
+        i, j, prompt, seed, out_path, cached = job
+        if cached:
+            src = "cached"
+        else:
+            _, src = generate_one(prompt, out_path, seed)
+        with rec_lock:
+            counts[src] = counts.get(src, 0) + 1
+            recorded.append({"topic_id": topic.get("id"), "scene": i, "cut": j,
+                             "prompt": prompt, "seed": seed, "source": src,
+                             "path": os.path.basename(out_path)})
+        print(f"[visuals] cut s{i}c{j}: {src} "
+              f"({os.path.getsize(out_path) // 1024} KB) \"{prompt[:48]}...\"")
+        return i, j, out_path
+
+    workers = max(1, int(getattr(config, "VISUALS_WORKERS", 4)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for i, j, path in pool.map(work, jobs):
+            result[i][j] = path
+
+    # 3. registry (per-cut records -> zero cross-video reuse)
     if recorded:
         lib = load_library()
         lib.extend(recorded)
         save_library(lib)
-        print(f"[visuals] generated {ok}/{len(prompts)} stills; registry now "
-              f"{len(lib)} entries")
+    srcs = ", ".join(f"{k}={v}" for k, v in counts.items() if v)
+    print(f"[visuals] DONE: {total_cuts} unique frames ({srcs}); "
+          f"registry now {len(load_library())} entries")
 
-    # order each scene's stills by variant so alternation is deterministic
-    for si in result:
-        result[si].sort()
-    return result
+    # safety: any unfilled slot (shouldn't happen) gets a procedural frame
+    for i, lst in result.items():
+        for j, p in enumerate(lst):
+            if p is None:
+                p = procedural_still(os.path.join(stills_dir, f"s{i:02d}_c{j:03d}.jpg"),
+                                     _seed_for(f"fill|{topic.get('id')}|{i}|{j}"))
+                lst[j] = p
+    return result  # type: ignore[return-value]
 
 
 if __name__ == "__main__":
-    # smoke test: derive prompts + generate ONE still for the first scene of
-    # the first curated topic, using the heuristic path if no LLM key.
+    # smoke: plan + prompts + frames for ONE scene, verify uniqueness
     from premium import scripts as S
+    from premium import compose as CO
     topic = S.TOPICS[0]
     scenes = topic["scenes"]
-    prompts = derive_scene_prompts(topic, scenes, per_scene=2)
-    for p in prompts:
-        print(f"  scene {p['scene']} v{p['variant']}: {p['prompt'][:90]}")
+    plan = CO.segment_plan(30.0, [])
+    texts = segment_texts(plan, [])
+    print(f"plan cuts: {len(plan)}")
     os.makedirs("./output", exist_ok=True)
-    seed = _seed_for(prompts[0]["prompt"])
-    generate_still(prompts[0]["prompt"], "./output/visual_test.jpg", seed)
-    print(f"OK -> ./output/visual_test.jpg ({os.path.getsize('./output/visual_test.jpg')//1024} KB)")
+    seed = _seed_for("smoke test frame")
+    p, src = generate_one("cinematic film still, a lone runner on a rain-soaked "
+                          "city street at night, moody light", "./output/v2_test.jpg", seed)
+    print(f"OK -> {p} ({src}, {os.path.getsize(p)//1024} KB)")
