@@ -258,10 +258,39 @@ async def _synth_scene_timed_async(text: str, out_path: str) -> list[dict]:
     except OSError:
         pass
 
+    # --- 1.4x tempo speedup (config.NARRATION_SPEED) -----------------------
+    # The user A/B-listened and found 1.4x "sounds real and good" (same effect
+    # as YouTube's 1.4x playback). We time-stretch the ASSEMBLED scene audio
+    # here — BEFORE the caller measures scene["duration"] and BEFORE Whisper
+    # transcribes the full narration — so every downstream timing (visual cut
+    # points, ASS subtitle cues, music ducking, total video length) is computed
+    # against the faster audio and stays perfectly in sync. atempo is a WSOLA
+    # time-stretch: it changes speed WITHOUT changing pitch, so the voice stays
+    # natural (no chipmunk). Done per-scene (not on the final mix) so the
+    # per-sentence cut timings compose uses are scaled to match.
+    speed = float(getattr(config, "NARRATION_SPEED", 1.0) or 1.0)
+    if speed != 1.0:
+        fast = out_path + ".fast.mp3"
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-i", out_path, "-af", f"atempo={speed}",
+             "-c:a", "libmp3lame", "-b:a", "192k", fast],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0 and os.path.exists(fast) and os.path.getsize(fast) > 100:
+            os.replace(fast, out_path)
+            inv = 1.0 / speed
+            for t in timings:
+                t["start"] = round(t["start"] * inv, 3)
+                t["end"] = round(t["end"] * inv, 3)
+            t_cursor = round(t_cursor * inv, 3)
+        else:
+            print(f"  [tts] atempo {speed}x failed (rc={r.returncode}); using normal speed")
+
     npunch = sum(1 for t in timings if t["cls"] == "punch")
     nrefl = sum(1 for t in timings if t["cls"] == "reflective")
     print(f"  [tts] scene: {len(sentences)} sentences, {t_cursor:.1f}s "
-          f"({npunch} punch, {len(sentences)-npunch-nrefl} normal, {nrefl} reflective)")
+          f"({npunch} punch, {len(sentences)-npunch-nrefl} normal, {nrefl} reflective)"
+          + (f" @ {speed}x" if speed != 1.0 else ""))
     return timings
 
 
