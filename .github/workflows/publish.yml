@@ -41,6 +41,28 @@ jobs:
             ./music
           key: premium-cache-${{ runner.os }}-v1
 
+      - name: Ensure >= 2 unpublished topics in library (NVIDIA NIM generation)
+        # Generates fresh 6-scene scripts via NVIDIA NIM (nemotron-3-ultra-550b)
+        # so the queue always has NEW content to publish — no more looping back
+        # to re-upload a duplicate curated topic. No-op if NVIDIA_API_KEY is
+        # missing; the queue then falls back to curated TOPICS.
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: python ensure_library.py
+
+      - name: Commit generated topics to library
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add premium/topics_library.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: add LLM-generated topics to library [skip ci]"
+            git push
+            echo "pushed library update"
+          else
+            echo "no library changes to commit"
+          fi
+
       - name: Generate and publish premium video
         env:
           # === LLM (OpenRouter, free Nemotron Ultra 550B) ===

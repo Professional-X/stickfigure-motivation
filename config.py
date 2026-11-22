@@ -30,7 +30,7 @@ OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL") or "nvidia/nemotron-3-ultr
 # --- NVIDIA Build (legacy, kept for reference) ---
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY") or ""
-NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL") or "meta/llama-3.3-70b-instruct"
+NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL") or "nvidia/nemotron-3-ultra-550b-a55b"
 
 # Convenience: which key + base URL + model to actually use
 if LLM_PROVIDER == "nvidia":
@@ -81,7 +81,7 @@ IMAGE_SEED = 42  # fixed base seed for visual consistency across scenes
 # ============================================================
 # TTS — Edge-TTS (free, no API key)
 # ============================================================
-TTS_VOICE = "en-US-GuyNeural"  # deep male motivation voice
+TTS_VOICE = "en-US-AndrewMultilingualNeural"  # warm, natural, softer male (was en-US-GuyNeural — too hard/robotic for the "softer + human" brief)
 TTS_RATE = "-8%"  # slightly slower for gravitas
 
 

@@ -24,7 +24,7 @@ import json
 import traceback
 
 import config
-from tts import synth_scene_timed, get_audio_duration, concat_audio
+from tts import synth_scene_timed, get_audio_duration, concat_audio, process_narration
 from upload import upload_to_youtube
 
 from premium import queue as Q
@@ -71,6 +71,12 @@ def run():
     # 3. Concat narration + transcribe -> ASS (resilient: skip subs on failure)
     full_narration = os.path.join(work, "full_narration.mp3")
     concat_audio([s["audio_path"] for s in scenes], full_narration)
+    # softer + more human narration: gentle compression, de-ess, warmth, smooth
+    # normalize (tames Edge-TTS metallic edge + shouty peaks). Applied BEFORE
+    # transcription (cleaner audio -> better Whisper results) + before mix.
+    processed = os.path.join(work, "narration_processed.mp3")
+    process_narration(full_narration, processed)
+    full_narration = processed
     sub_path = os.path.join(work, "subtitles.ass")
     ass_path = SUB.transcribe_and_ass(full_narration, sub_path)
     if ass_path is None:

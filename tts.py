@@ -300,6 +300,49 @@ def concat_audio(audio_paths: list[str], out_path: str) -> str:
     return out_path
 
 
+def process_narration(in_path: str, out_path: str) -> str:
+    """Soften + humanize the full narration with a gentle ffmpeg chain.
+
+    The raw Edge-TTS output is clean but a touch metallic and dynamically flat
+    in a shouty way. This pass:
+      - highpass 80Hz        : cut low rumble / desk hum
+      - acompressor          : gentle 3:1 compression evens out the punchy peaks
+                               so the delivery breathes instead of pushing forward
+      - afftdn (light)       : tames the Edge-TTS metallic edge without going underwater
+      - highshelf -3dB@5.5k  : de-ess / reduce harsh sibilance
+      - lowshelf +2dB@160    : add a touch of chest warmth
+      - lowpass 14k          : soften the very top end (less "digital")
+      - dynaudnorm           : smooth, transparent loudness normalization (not
+                               the aggressive one-pass loudnorm that pumps)
+
+    Falls back to a straight copy if ffmpeg filtering fails, so the pipeline
+    never breaks on audio post-processing.
+    """
+    fg = (
+        "highpass=f=80,"
+        "acompressor=threshold=-18dB:ratio=2.5:attack=25:release=300:knee=3:makeup=1,"
+        "afftdn=nr=6:nf=-25,"
+        "highshelf=f=5500:g=-3dB,"
+        "lowshelf=f=160:g=+2dB,"
+        "lowpass=f=14000,"
+        "volume=5dB"
+    )
+    cmd = ["ffmpeg", "-y", "-i", in_path, "-af", fg,
+           "-c:a", "libmp3lame", "-b:a", "192k", out_path]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) < 100:
+        print(f"  [tts] narration post-process failed (rc={r.returncode}); using raw narration")
+        if os.path.exists(out_path):
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+        shutil.copyfile(in_path, out_path)
+        return out_path
+    print(f"  [tts] narration post-processed (softer/warmer/compressed) -> {os.path.basename(out_path)}")
+    return out_path
+
+
 if __name__ == "__main__":
     os.makedirs("./output", exist_ok=True)
     t0 = time.time()
