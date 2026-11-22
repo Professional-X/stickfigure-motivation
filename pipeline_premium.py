@@ -86,17 +86,22 @@ def run():
     # 4. Music
     music_path, music_attr = MU.ensure_music(config.MUSIC_DIR)
 
-    # 5. Topical AI stills (PRIMARY) — every frame now shows the THING the
-    #    script is about, not generic stock. Mixkit is fetched lazily as a
-    #    per-scene fallback only for scenes where image generation fell short.
+    # 5. Topical AI frames — v2: ONE unique image PER CUT (never a reused pool).
+    #    compose owns the cut plan, so we ask it for the exact cuts first, then
+    #    generate one unique topical frame per cut from the words spoken there.
+    #    Mixkit is fetched lazily only for scenes that somehow end up frameless.
     visuals_dir = os.path.join(work, "visuals")
-    stills_map = VS.fetch_stills_for_scenes(topic, scenes, visuals_dir,
-                                            per_scene=config.VISUALS_PER_SCENE)
+    plans = {i: CO.segment_plan(s["duration"], s.get("sentence_timings") or [])
+             for i, s in enumerate(scenes)}
+    n_cuts = sum(len(p) for p in plans.values())
+    print(f"[pipeline] cut plan: {n_cuts} cuts across {len(scenes)} scenes -> "
+          f"{n_cuts} unique AI frames")
+    stills_map = VS.fetch_stills_for_segments(topic, scenes, plans, visuals_dir)
     clips_dir = os.path.join(work, "clips")
     clips_map = {}
     missing = [i for i in range(len(scenes)) if not stills_map.get(i)]
     if missing:
-        print(f"[pipeline] {len(missing)} scene(s) short on stills -> Mixkit fallback")
+        print(f"[pipeline] {len(missing)} scene(s) without frames -> Mixkit fallback")
         clips_map = MX.fetch_clips_for_scenes(scenes, clips_dir, per_scene=3)
 
     # 6. Thumbnails (background = topical AI still from scenes 0-2; Mixkit
