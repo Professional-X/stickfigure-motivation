@@ -62,6 +62,25 @@ def extract_still(clip_path: str, out_path: str, t_offset: float = 1.5) -> str:
     return out_path
 
 
+def grade_still(still_path: str, out_path: str) -> str:
+    """Grade a still IMAGE (the topical AI stills from premium/visuals.py) into a
+    1280x720 PNG with the same cinematic grade as extract_still. extract_still's
+    `-ss` seek fails on single-frame image inputs, so this is the image-path
+    equivalent (no seek, one frame)."""
+    cmd = [
+        "ffmpeg", "-y", "-i", still_path, "-frames:v", "1",
+        "-vf", f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+               f"crop={W}:{H},"
+               "eq=contrast=1.08:saturation=1.10:brightness=-0.02,"
+               "colorbalance=rs=-0.05:bs=0.10:rh=0.06:bh=-0.06,vignette",
+        out_path,
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError(f"grade_still failed: {res.stderr[-300:]}")
+    return out_path
+
+
 def _gradient_overlay(img: Image.Image, start_frac: float, alpha_max: int) -> Image.Image:
     """Return an RGBA gradient (transparent -> dark) composited onto img."""
     w, h = img.size
