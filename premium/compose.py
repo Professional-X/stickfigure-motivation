@@ -145,24 +145,35 @@ def _render_segment(clip_path: str, seg_dur: float, motion: str, seg_idx: int,
 
 
 def _xfade_concat_segs(seg_paths: list[str], seg_durs: list[float], out_path: str) -> str:
-    """Stitch segments with 0.12s fade xfades (quick energy cuts)."""
+    """Stitch segments with 0.12s fade xfades (quick energy cuts).
+
+    CRITICAL: each xfade shortens the chain by `xf` (the transition overlap).
+    So the offset for the k-th xfade must be measured against the ACTUAL running
+    output end (cumulative segment durations MINUS k prior overlaps), not
+    against the raw sum of segment durations. The earlier version used the raw
+    sum, which made every offset after the 2nd segment land PAST the chain end —
+    ffmpeg then truncated the output to the first ~2 segments, producing ~5s
+    scenes instead of ~38s (the broken ~30s YouTube video on run #30).
+    """
     if len(seg_paths) == 1:
         _run(["ffmpeg", "-y", "-i", seg_paths[0], "-c", "copy",
               "-pix_fmt", "yuv420p", out_path], "  single-segment scene")
         return out_path
     xf = 0.12
-    parts, prev, cum = [], "[0:v]", 0.0
+    parts, prev = [], "[0:v]"
+    end_prev = seg_durs[0]                      # actual duration of the chain so far
     for i in range(1, len(seg_paths)):
-        cum += seg_durs[i - 1]
-        off = max(0.0, cum - xf)
+        off = max(0.0, end_prev - xf)           # transition starts xf before chain end
         nv = f"[v{i}]"
         parts.append(f"{prev}[{i}:v]xfade=transition=fade:duration={xf}:offset={off:.3f}{nv}")
         prev = nv
+        end_prev = end_prev + seg_durs[i] - xf  # new chain end (lost xf to overlap)
     args = ["ffmpeg", "-y"]
     for p in seg_paths:
         args += ["-i", p]
     args += ["-filter_complex", ";".join(parts), "-map", prev,
              "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+             "-r", str(S.FPS),                  # pin CFR 30fps so concat_scenes -c copy is clean
              "-pix_fmt", "yuv420p", out_path]
     _run(args, f"  xfade concat {len(seg_paths)} segments")
     return out_path
