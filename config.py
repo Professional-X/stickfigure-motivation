@@ -92,11 +92,24 @@ TTS_RATE = "-8%"  # slightly slower for gravitas
 # preserves pitch (WSOLA), so the voice stays natural — no chipmunk effect.
 NARRATION_SPEED = 1.4
 
-# Topical AI scene stills: how many UNIQUE generated stills to produce per
-# scene. They are alternated across that scene's rapid-cut segments so no two
-# consecutive cuts share the same frame. 2 = strong variety at ~9 min gen time
-# on free Pollinations; raise to 3+ if IMAGE_PROVIDER=cloudflare (no rate limit).
-VISUALS_PER_SCENE = 2
+# Topical AI scene frames (v2): ONE unique generated still PER CUT. The
+# rapid-cut montage breaks each scene into 1.6-4.0s segments (~60 cuts per
+# video) and every single cut gets its own unique, never-reused frame — no
+# cycling a small pool. Free providers only, generated in parallel with a
+# fallback chain so a cut never repeats even when some generations fail:
+#   Pollinations flux -> Pollinations turbo -> Openverse CC photo ->
+#   procedural unique gradient (guaranteed floor, zero repeats).
+VISUALS_PER_CUT = True           # v2 mode: one unique image per cut
+VISUALS_WORKERS = 4              # parallel image-generation workers
+VISUALS_MAX_PER_VIDEO = 96       # hard cap on generated images per video
+POLLINATIONS_REFERRER = "stickverse-motivation"  # anonymous tier w/ referrer
+
+# Rapid-cut windows (seconds). The segment plan drives BOTH the editor's cuts
+# and the AI frame generation (one unique frame per cut), so changing these
+# changes the number of images per video. 2.2-4.4s keeps TV-drama pacing while
+# keeping the per-cut frame count (~45-60) within the free image providers' reach.
+CUT_MIN_SEG = 2.2
+CUT_MAX_SEG = 4.4
 
 
 # ============================================================
