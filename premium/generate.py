@@ -203,8 +203,9 @@ def _call_llm(angle: str, category: str, retries: int = 3) -> dict:
                 ],
                 temperature=0.85,
                 top_p=0.9,
-                max_tokens=8000,   # Nemotron Ultra is a reasoning model — needs headroom
-                                   # for ~600-1500 reasoning tokens before the JSON content
+                max_tokens=12000,  # Nemotron Ultra is a reasoning model — needs headroom
+                                   # for ~600-2000 reasoning tokens before the JSON content
+                                   # (8000 saw occasional "empty content" failures)
                 response_format={"type": "json_object"},
             )
             raw = (resp.choices[0].message.content or "").strip()
@@ -358,7 +359,7 @@ def generate_novel(used_ids: list) -> dict:
                 ],
                 temperature=0.95,
                 top_p=0.95,
-                max_tokens=8000,
+                max_tokens=12000,
                 response_format={"type": "json_object"},
             )
             raw = (resp.choices[0].message.content or "").strip()

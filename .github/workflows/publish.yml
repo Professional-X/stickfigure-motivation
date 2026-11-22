@@ -10,7 +10,9 @@ on:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # Mixkit download + 6-scene cinematic compose (~10-15 min)
+    timeout-minutes: 45  # ensure_library (NVIDIA gen ~3-5 min) + Mixkit + 6-scene
+                          # full-length cinematic compose (~15-20 min now the xfade
+                          # fix renders every scene fully) + 254 MB upload (~3 min)
     permissions:
       contents: write   # needed for gh release create + git push
 
