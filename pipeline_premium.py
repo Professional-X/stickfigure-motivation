@@ -35,6 +35,7 @@ from premium import thumbnails as TH
 from premium import compose as CO
 from premium import metadata as META
 from premium import scripts as S
+from premium import visuals as VS
 from datetime import datetime
 
 
@@ -85,30 +86,46 @@ def run():
     # 4. Music
     music_path, music_attr = MU.ensure_music(config.MUSIC_DIR)
 
-    # 5. Mixkit footage
+    # 5. Topical AI stills (PRIMARY) — every frame now shows the THING the
+    #    script is about, not generic stock. Mixkit is fetched lazily as a
+    #    per-scene fallback only for scenes where image generation fell short.
+    visuals_dir = os.path.join(work, "visuals")
+    stills_map = VS.fetch_stills_for_scenes(topic, scenes, visuals_dir,
+                                            per_scene=config.VISUALS_PER_SCENE)
     clips_dir = os.path.join(work, "clips")
-    clips_map = MX.fetch_clips_for_scenes(scenes, clips_dir, per_scene=3)
+    clips_map = {}
+    missing = [i for i in range(len(scenes)) if not stills_map.get(i)]
+    if missing:
+        print(f"[pipeline] {len(missing)} scene(s) short on stills -> Mixkit fallback")
+        clips_map = MX.fetch_clips_for_scenes(scenes, clips_dir, per_scene=3)
 
-    # 6. Thumbnails (stills from the first 2-3 scenes' clips)
-    stills_dir = os.path.join(work, "stills")
-    os.makedirs(stills_dir, exist_ok=True)
+    # 6. Thumbnails (background = topical AI still from scenes 0-2; Mixkit
+    #    still extraction as fallback)
+    thumb_stills_dir = os.path.join(work, "thumb_stills")
+    os.makedirs(thumb_stills_dir, exist_ok=True)
     still_paths = []
     for i in range(min(3, len(scenes))):
+        sp = os.path.join(thumb_stills_dir, f"still_{i}.png")
+        if stills_map.get(i):
+            try:
+                TH.grade_still(stills_map[i][0], sp)
+                still_paths.append(sp)
+                continue
+            except Exception as e:
+                print(f"[pipeline] grade_still {i} failed ({str(e)[:80]}) -> raw still")
+                still_paths.append(stills_map[i][0])
+                continue
         clips = clips_map.get(i, [])
-        if not clips:
-            continue
-        # pick a clip midway through the scene list for visual variety
-        clip = clips[0]
-        sp = os.path.join(stills_dir, f"still_{i}.png")
-        try:
-            TH.extract_still(clip, sp, t_offset=1.5)
-            still_paths.append(sp)
-        except Exception as e:
-            print(f"[pipeline] still {i} failed: {e}")
+        if clips:
+            try:
+                TH.extract_still(clips[0], sp, t_offset=1.5)
+                still_paths.append(sp)
+            except Exception as e:
+                print(f"[pipeline] still {i} failed: {e}")
     if not still_paths:
         # last resort: a plain dark still
         from PIL import Image
-        sp = os.path.join(stills_dir, "still_fallback.png")
+        sp = os.path.join(thumb_stills_dir, "still_fallback.png")
         Image.new("RGB", (TH.W, TH.H), (12, 12, 14)).save(sp)
         still_paths.append(sp)
 
@@ -125,7 +142,7 @@ def run():
     # 7. Compose
     print(f"\n[pipeline] composing cinematic video (this takes a few minutes)...")
     final_path = CO.compose_premium(scenes, clips_map, full_narration,
-                                    music_path, ass_path, work)
+                                    music_path, ass_path, work, stills_map=stills_map)
     print(f"[pipeline] final video: {final_path} ({os.path.getsize(final_path)//(1<<20)} MB)")
 
     # 8. Metadata
