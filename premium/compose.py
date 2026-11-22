@@ -15,6 +15,9 @@ CC-BY (attribution handled in metadata). Narration is Edge-TTS (free).
 """
 import os
 import subprocess
+import time
+
+import config
 
 from . import scripts as S
 
@@ -93,11 +96,19 @@ def _motion_expr(motion: str, n_frames: int) -> tuple[str, str, str]:
 
 
 def _segment_plan(duration: float, timings: list[dict],
-                  min_seg: float = 1.6, max_seg: float = 4.0) -> list[tuple[float, float]]:
-    """Turn sentence timings into (start, end) cut points, enforcing a 1.6-4.0s
-    segment window. Falls back to even ~3s splits when no timings are passed."""
+                  min_seg: float | None = None,
+                  max_seg: float | None = None) -> list[tuple[float, float]]:
+    """Turn sentence timings into (start, end) cut points, enforcing the
+    config.CUT_MIN_SEG-CUT_MAX_SEG window (2.2-4.4s — TV-drama pacing). The
+    SAME plan drives the AI frame generation (one unique image per cut), so
+    both the pipeline and the montage must call this with identical inputs.
+    Falls back to even splits when no timings are passed."""
+    if min_seg is None:
+        min_seg = float(getattr(config, "CUT_MIN_SEG", 2.2))
+    if max_seg is None:
+        max_seg = float(getattr(config, "CUT_MAX_SEG", 4.4))
     if not timings:
-        n = max(1, int(round(duration / 3.0)))
+        n = max(1, int(round(duration / ((min_seg + max_seg) / 2))))
         edges = [duration * i / n for i in range(n + 1)]
         return [(edges[i], edges[i + 1]) for i in range(n)]
     cuts = [0.0] + [t["end"] for t in timings] + [duration]
@@ -117,6 +128,25 @@ def _segment_plan(duration: float, timings: list[dict],
         if e - s > 0.1:
             segs.append((s, e))
     return segs or [(0.0, duration)]
+
+
+def segment_plan(duration: float, timings: list[dict]) -> list[tuple[float, float]]:
+    """Public cut plan for one scene. compose owns the cut windows so the
+    pipeline can generate EXACTLY one unique AI frame per cut (premium.visuals
+    v2) and the montage consumes them index-aligned — no image is ever reused."""
+    return _segment_plan(duration, timings)
+
+
+def _emergency_still(scenes_dir: str, scene_idx: int, k: int) -> str:
+    """Unique procedural frame for a cut whose AI still is missing or corrupt.
+    Never re-uses a neighbouring cut's still — every cut always shows its own
+    frame, even in the worst failure case."""
+    from . import visuals as VS
+    out = os.path.join(scenes_dir, f"s{scene_idx:02d}_c{k:03d}_emg.jpg")
+    if not os.path.exists(out) or os.path.getsize(out) < 3000:
+        seed = VS._seed_for(f"emergency|{scene_idx}|{k}")
+        VS.procedural_still(out, seed)
+    return out
 
 
 def _render_segment(clip_path: str, seg_dur: float, motion: str, seg_idx: int,
@@ -210,27 +240,31 @@ def _valid_image(path: str, min_size: int = 3000) -> bool:
 def render_scene_montage(clips: list[str], duration: float, timings: list[dict],
                          out_path: str, scene_idx: int,
                          is_image: bool = False) -> str:
-    """Render one scene as a rapid-cut montage cycling through the scene's
-    sources with rotating motion. Sources are either Mixkit video clips
-    (is_image=False, the legacy path) or topical AI stills (is_image=True,
-    from premium/visuals.py — `-loop 1` + lanczos upscale per segment).
+    """Render one scene as a rapid-cut montage with rotating motion.
 
-    With stills, the scene's `per_scene` variants are alternated across the
-    segment cuts so no two consecutive cuts share the same frame. If no still
-    validates, raises so compose_premium's try/except falls back to Mixkit.
+    is_image=True (v2 topical AI frames): `clips` is the scene's per-CUT still
+    list from premium/visuals.py, index-aligned to the segment plan — cut k
+    shows still k, its own unique frame, NEVER a cycled pool entry. A cut whose
+    still is missing/corrupt (or whose render fails) gets its own emergency
+    procedural frame instead of re-using a neighbour's.
+
+    is_image=False (legacy Mixkit path): `clips` is a video pool cycled across
+    the cuts, with a solid-color fallback if nothing validates.
     """
     scenes_dir = os.path.dirname(out_path)
-    checker = _valid_image if is_image else _valid_video
-    valid_clips = [c for c in clips if checker(c)]
-    if not valid_clips:
-        if is_image:
-            raise RuntimeError(f"scene {scene_idx}: no valid stills -> Mixkit fallback")
-        fallback = os.path.join(scenes_dir, f"fallback_{scene_idx}.mp4")
-        _run(["ffmpeg", "-y", "-f", "lavfi",
-              "-i", "color=c=0x0e0e12:s=1920x1080:r=30:d=2",
-              "-c:v", "libx264", "-preset", "fast", "-crf", "20", fallback],
-             f"  scene {scene_idx} color-fallback source")
-        valid_clips = [fallback]
+    if is_image:
+        # positions preserved — alignment to the plan matters more than
+        # pre-filtering; per-use validation below handles bad files
+        valid_clips = list(clips)
+    else:
+        valid_clips = [c for c in clips if _valid_video(c)]
+        if not valid_clips:
+            fallback = os.path.join(scenes_dir, f"fallback_{scene_idx}.mp4")
+            _run(["ffmpeg", "-y", "-f", "lavfi",
+                  "-i", "color=c=0x0e0e12:s=1920x1080:r=30:d=2",
+                  "-c:v", "libx264", "-preset", "fast", "-crf", "20", fallback],
+                 f"  scene {scene_idx} color-fallback source")
+            valid_clips = [fallback]
 
     segs = _segment_plan(duration, timings)
     n_seg = len(segs)
@@ -242,17 +276,30 @@ def render_scene_montage(clips: list[str], duration: float, timings: list[dict],
     xf = 0.12
     inflate = ((n_seg - 1) * xf / n_seg) if n_seg > 1 else 0.0
     seg_paths, seg_durs = [], []
+    emergency = 0
     for k, (s, e) in enumerate(segs):
         sd = max(e - s, 0.5) + inflate
-        clip = valid_clips[k % len(valid_clips)]
+        if is_image:
+            clip = valid_clips[k] if k < len(valid_clips) else None
+            if clip is None or not _valid_image(clip):
+                clip = _emergency_still(scenes_dir, scene_idx, k)
+                emergency += 1
+        else:
+            clip = valid_clips[k % len(valid_clips)]
         motion = MOTIONS[k % len(MOTIONS)]
         try:
             p = _render_segment(clip, sd, motion, k, scenes_dir,
                                 fade_in=(k == 0), is_image=is_image)
         except Exception as ex:
-            print(f"[compose] scene {scene_idx} seg {k} failed ({str(ex)[:80]}) -> retry src[0]/in")
-            p = _render_segment(valid_clips[0], sd, "in", k, scenes_dir,
-                                fade_in=(k == 0), is_image=is_image)
+            print(f"[compose] scene {scene_idx} cut {k} failed ({str(ex)[:80]}) -> unique emergency frame")
+            if is_image:
+                clip = _emergency_still(scenes_dir, scene_idx, k)
+                emergency += 1
+                p = _render_segment(clip, sd, "in", k, scenes_dir,
+                                    fade_in=(k == 0), is_image=True)
+            else:
+                p = _render_segment(valid_clips[0], sd, "in", k, scenes_dir,
+                                    fade_in=(k == 0))
         seg_paths.append(p)
         seg_durs.append(sd)
 
@@ -268,9 +315,13 @@ def render_scene_montage(clips: list[str], duration: float, timings: list[dict],
             os.remove(fb)
         except OSError:
             pass
-    kind = "stills" if is_image else "clips"
-    print(f"[compose] scene {scene_idx}: {len(segs)} cuts over {duration:.1f}s "
-          f"(avg {duration / max(len(segs), 1):.1f}s/cut, {len(valid_clips)} {kind})")
+    if is_image:
+        print(f"[compose] scene {scene_idx}: {len(segs)} cuts over {duration:.1f}s "
+              f"(avg {duration / max(len(segs), 1):.1f}s/cut, one unique frame per cut"
+              + (f", {emergency} emergency" if emergency else "") + ")")
+    else:
+        print(f"[compose] scene {scene_idx}: {len(segs)} cuts over {duration:.1f}s "
+              f"(avg {duration / max(len(segs), 1):.1f}s/cut, {len(valid_clips)} clips)")
     return out_path
 
 
