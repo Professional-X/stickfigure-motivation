@@ -1,13 +1,19 @@
 video_url: https://youtube.com/watch?v=DDCrzHuJ9xw
 studio_edit: https://studio.youtube.com/video/DDCrzHuJ9xw/editing
-primary_thumbnail (committed to repo): thumbnail.png
-all_variants (committed): thumbnail_A.png, thumbnail_B.png, thumbnail_C.png
+primary_thumbnail (committed): output/20261122_065744/thumbnail.png
+raw_url: https://raw.githubusercontent.com/Professional-X/stickfigure-motivation/main/output/20261122_065744/thumbnail.png
 
-How to set the thumbnail:
-  Option A (manual, now): open the studio_edit URL above and upload
-    the primary_thumbnail PNG from this repo
-    (output/<run>/thumbnail.png or output/<run>/thumbnails/thumbnail_B.png).
-  Option B (automate future runs): run get_youtube_oauth.py locally,
-    add YOUTUBE_CLIENT_ID + YOUTUBE_CLIENT_SECRET + YOUTUBE_REFRESH_TOKEN
-    as repo secrets, then re-trigger. Run scripts/backfill_thumbnails.py
-    to set thumbnails on videos already uploaded.
+Auto-set via Composio YOUTUBE_UPDATE_THUMBNAIL FAILED:
+  Access forbidden: The request cannot be completed because you have exceeded your <a href="/youtube/data/getting-started#quota">quota</a>.
+
+>> YouTube API QUOTA EXHAUSTED. Composio runs the thumbnail
+   call on a SHARED YouTube API project (across all Composio users),
+   so its quota is intermittent. This is NOT a channel/verification
+   problem. The quota resets at midnight Pacific time. Options:
+     - wait for the next scheduled run (Mon/Wed/Fri 17:00 UTC) — it
+       retries automatically, or
+     - run scripts/backfill_thumbnails.py after the quota resets, or
+     - add your own YouTube OAuth secrets (YOUTUBE_CLIENT_ID,
+       YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN — see
+       get_youtube_oauth.py) so uploads + thumbnails use YOUR
+       10,000-unit/day quota instead of Composio's shared pool.
