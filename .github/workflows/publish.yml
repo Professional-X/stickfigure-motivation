@@ -10,9 +10,12 @@ on:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # was 45 — the topical AI stills (Pollinations ~6s/call
-                          # x 12 stills/video) add ~2-3 min on top of compose +
-                          # upload; 60 gives comfortable headroom.
+    timeout-minutes: 75  # was 60 — v2 generates ONE unique AI frame per cut
+                          # (~45-60 frames/video vs 12 before) through the free
+                          # provider chain (Pollinations quota ~30-60s/image per
+                          # IP, mitigated by 4 parallel workers + adaptive 402
+                          # pacing), so the image phase can run 20-30 min. 75
+                          # keeps compose + upload comfortably inside.
     permissions:
       contents: write   # needed for gh release create + git push
 
