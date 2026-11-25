@@ -31,12 +31,20 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        # backfill only needs requests + python-dotenv (config.py loads .env).
+        # Avoid the full requirements.txt (faster-whisper etc. are heavy and
+        # unused here). PyNaCl is only for setup_secrets, not backfill.
+        run: pip install requests python-dotenv
 
       - name: Backfill thumbnails (set on all videos flagged MANUAL_NEEDED)
         env:
           COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
           COMPOSIO_ENTITY_ID: ${{ secrets.COMPOSIO_ENTITY_ID }}
+          # Direct OAuth (primary path): your own 10k/day quota. Composio is
+          # the automatic fallback when these aren't set or the call fails.
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python scripts/backfill_thumbnails.py
 
