@@ -68,11 +68,17 @@ def main():
     owner, repo = git_owner_repo()
     raw_base = f"https://raw.githubusercontent.com/{owner}/{repo}/main"
 
-    if not (os.environ.get("COMPOSIO_API_KEY") and os.environ.get("COMPOSIO_ENTITY_ID")):
-        print("ERROR: COMPOSIO_API_KEY / COMPOSIO_ENTITY_ID not set.")
-        print("Export them (same values as the repo secrets) + ensure the channel")
-        print("is verified at https://www.youtube.com/verify first.")
+    have_oauth = (os.environ.get("YOUTUBE_REFRESH_TOKEN")
+                  and os.environ.get("YOUTUBE_CLIENT_ID")
+                  and os.environ.get("YOUTUBE_CLIENT_SECRET"))
+    have_composio = (os.environ.get("COMPOSIO_API_KEY")
+                     and os.environ.get("COMPOSIO_ENTITY_ID"))
+    if not (have_oauth or have_composio):
+        print("ERROR: need either YOUTUBE_REFRESH_TOKEN (+CLIENT_ID/SECRET) for the")
+        print("direct OAuth path, or COMPOSIO_API_KEY/ENTITY_ID for the fallback.")
         return
+    print(f"[backfill] direct OAuth: {'yes' if have_oauth else 'no'} | "
+          f"Composio fallback: {'yes' if have_composio else 'no'}")
 
     dirs = [args.dir] if args.dir else sorted(glob.glob("output/*/"))
     dirs = [d if d.endswith("/") else d + "/" for d in dirs if os.path.isdir(d)]
@@ -93,10 +99,23 @@ def main():
         if not vid:
             print(f"  {d}: couldn't parse video_id — skip"); continue
         raw_url = f"{raw_base}/{d}thumbnail.png"
-        print(f"  {d.strip('/')}: setting thumbnail on {vid} via Composio...")
-        ok, msg = upload._set_thumbnail_via_composio(vid, raw_url)
+        local_thumb = os.path.join(d, "thumbnail.png")
+        ok, msg, via = False, "not attempted", ""
+        # PRIMARY: direct YouTube Data API (your own 10k/day quota) — same path
+        # upload.py uses during publish. Uses the LOCAL committed thumbnail.png.
+        if have_oauth:
+            print(f"  {d.strip('/')}: setting thumbnail on {vid} via direct OAuth...")
+            ok = upload._set_thumbnail(vid, local_thumb)
+            via = "direct OAuth" if ok else ""
+            if not ok:
+                msg = "direct OAuth _set_thumbnail returned False"
+        # FALLBACK: Composio YOUTUBE_UPDATE_THUMBNAIL (shared quota, intermittent)
+        if not ok and have_composio:
+            print(f"  {d.strip('/')}: direct failed/unavailable -> Composio fallback...")
+            ok, msg = upload._set_thumbnail_via_composio(vid, raw_url)
+            via = "Composio" if ok else ""
         if ok:
-            print(f"    OK — thumbnail set")
+            print(f"    OK — thumbnail set via {via}")
             if os.path.exists(marker):
                 os.remove(marker)
             done += 1
