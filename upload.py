@@ -192,6 +192,16 @@ def _set_thumbnail(video_id: str, thumbnail_path: str) -> bool:
         if r.status_code == 400 and "verify" in r.text.lower():
             print("[upload] NOTE: custom thumbnails require a verified YouTube account.")
             print("[upload]       Verify at https://www.youtube.com/verify (takes ~24h).")
+        elif r.status_code == 403 and "properly authorized" in r.text.lower():
+            # The token is for a DIFFERENT channel than the one that owns the
+            # video — almost always because @StickVerse is a Brand Account and
+            # the OAuth consent defaulted to the personal YouTube channel.
+            print("[upload] NOTE: 403 'not properly authorized' = the OAuth token is")
+            print("[upload]       for a different channel than the video's owner.")
+            print("[upload]       @StickVerse is likely a Brand Account. Re-run")
+            print("[upload]       get_youtube_oauth.py and in Google's account picker")
+            print("[upload]       SELECT the @StickVerse brand-account channel (not your")
+            print("[upload]       personal Google account). Use prompt=select_account.")
         return False
     except Exception as e:
         print(f"[upload] thumbnail set exception: {type(e).__name__}: {e}")
