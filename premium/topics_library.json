@@ -263,5 +263,58 @@
       "discipline",
       "mindset"
     ]
+  },
+  {
+    "id": "priority-not-time",
+    "category": "Success",
+    "title": "You Don't Have a Time Problem You Have a Priority Problem",
+    "hook_line": "You are not short on hours; you are short on decisions.",
+    "recurring_phrase": "own the clock",
+    "thumbnail_text": "OWN YOUR TIME",
+    "scenes": [
+      {
+        "narration": "You are not short on hours; you are short on decisions. Every sunrise hands you the same twenty‑four slots and you fill them with noise, scrolling, excuses, and the illusion of later. The clock does not negotiate; it only ticks. Own the clock. You decide which tasks earn a slot and which die in the margin. Stop pretending busyness equals progress. Each minute you surrender to distraction is a minute you steal from the life you claim to want. The ledger is yours to balance.",
+        "clip_category": "road"
+      },
+      {
+        "narration": "Your inbox swallows mornings, your feed devours evenings, and the gym membership gathers dust while you count likes as achievement. Each notification is a micro‑loan against your future, interest paid in regret. You trade depth for breadth, breadth for noise, noise for the hollow comfort of being busy. The result: projects stall, relationships thin, health erodes, and the mirror reflects a stranger. Time is not the thief; you are the architect of the leak. Every wasted hour compounds into a future you did not design.",
+        "clip_category": "city"
+      },
+      {
+        "narration": "Stoics teach that the only territory you command is the choice of the next action. When you treat every hour as a deliberate vote for the person you intend to become, the calendar becomes a weapon. Priority is not a list; it is a filter that discards the trivial before it reaches your hands. The shift is internal: you stop asking for more time and start demanding better decisions. Own the clock. Every choice you make rewrites the ledger in real time. No external force can write it for you.",
+        "clip_category": "mountains"
+      },
+      {
+        "narration": "The brain rewires when repetition meets intention; each time you reject a low‑value demand, the neural pathway for discipline thickens. Decision fatigue collapses because the filter removes the noise before it reaches the cortex. Power once spent on context‑switching now fuels deep work, compounding output exponentially. Results follow the law of cause and effect, not the myth of luck. Own the clock. You become the architect of momentum, not the victim of circumstance. Each disciplined hour stacks like bricks, building a structure that cannot be toppled by distraction.",
+        "clip_category": "abstract"
+      },
+      {
+        "narration": "Tonight write three non‑negotiable tasks for tomorrow, rank them, and block the first ninety minutes for the top one. Turn off notifications, place the phone in another room, and sit with a timer. When the alarm sounds, stand, stretch, and note the single outcome you produced. Repeat the ritual daily; the compounding effect will rewrite your ledger without fanfare. Own the clock. No negotiation, no compromise, no tomorrow—only the block you honored today. The next sunrise will find you already ahead because you chose the work over the noise.",
+        "clip_category": "sea"
+      },
+      {
+        "narration": "You are not short on hours; you are short on decisions, and the ledger now reads in your favor. Every sunrise hands you the same twenty‑four slots and you fill them with purpose, not noise. The clock still ticks, but now it ticks for you. Own the clock. Discipline is the only currency that buys freedom. When you look back, the record shows a life built on deliberate choices, not on the drift of default. The next hour belongs to you because you claimed it.",
+        "clip_category": "sky"
+      }
+    ],
+    "description": "You are not short on hours; you are short on decisions. The world hands everyone the same twenty‑four slots and most people waste them on noise, scrolling, and the illusion of later. This video dissects the lie that you need more time and shows how a ruthless priority filter rewrites the ledger in real time. You will learn the exact three‑task block method that forces deep work before distraction can speak. No motivation speeches, no soft habits—only a concrete protocol you can execute tonight. The clock does not negotiate; it only ticks. Own the clock and watch the compounding effect turn discipline into freedom. Every day you choose the block over the buzz you carve a future that cannot be erased by circumstance. The ledger reflects only what you deliberately write, nothing more, nothing less. discipline, priority, time, execution, freedom",
+    "tags": [
+      "success",
+      "priority-problem",
+      "discipline",
+      "stoicism",
+      "productivity",
+      "focus",
+      "habits",
+      "mindset",
+      "execution",
+      "grind"
+    ],
+    "hashtags": [
+      "discipline",
+      "priority",
+      "time",
+      "freedom"
+    ]
   }
 ]
